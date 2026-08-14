@@ -9,7 +9,7 @@
 #include <nvml.h>
 #include <nvtx3/nvtx3.hpp>
 
-#include "../../measure/power_telemetry.hpp"
+#include "../common/power_telemetry.hpp"
 
 #include <algorithm>
 #include <chrono>

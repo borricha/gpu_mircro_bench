@@ -290,11 +290,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.1}"
 NCU="${NCU:-${CUDA_HOME}/bin/ncu}"
 OUT_DIR="${ROOT_DIR}/build/ncu/executed_instruction_mix"
-MD_OUT="${OUT_DIR}/executed_instruction_mix.md"
-COMPARISON_CSV="${OUT_DIR}/executed_instruction_mix_comparison.csv"
-SOURCE_ALL_COMPARISON_CSV="${OUT_DIR}/executed_instruction_mix_source_all_comparison.csv"
-THREAD_COMPARISON_CSV="${OUT_DIR}/executed_instruction_mix_thread_comparison.csv"
-PRED_ON_COMPARISON_CSV="${OUT_DIR}/executed_instruction_mix_predicated_on_comparison.csv"
+MD_OUT_OVERRIDE=""
 
 usage() {
   cat <<'EOF'
@@ -375,13 +371,18 @@ declare -a reports=()
 while (($#)); do
   case "$1" in
     --out-dir) OUT_DIR="$2"; shift 2 ;;
-    --markdown) MD_OUT="$2"; shift 2 ;;
+    --markdown) MD_OUT_OVERRIDE="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) reports+=("$1"); shift ;;
   esac
 done
 [[ ${#reports[@]} -ge 1 ]] || { usage >&2; exit 2; }
 [[ -x "${NCU}" ]] || { echo "ncu not found: ${NCU}" >&2; exit 1; }
+MD_OUT="${MD_OUT_OVERRIDE:-${OUT_DIR}/executed_instruction_mix.md}"
+COMPARISON_CSV="${OUT_DIR}/executed_instruction_mix_comparison.csv"
+SOURCE_ALL_COMPARISON_CSV="${OUT_DIR}/executed_instruction_mix_source_all_comparison.csv"
+THREAD_COMPARISON_CSV="${OUT_DIR}/executed_instruction_mix_thread_comparison.csv"
+PRED_ON_COMPARISON_CSV="${OUT_DIR}/executed_instruction_mix_predicated_on_comparison.csv"
 mkdir -p "${OUT_DIR}" "$(dirname "${MD_OUT}")"
 
 printf '%s\n\n' '# L1 v2 — NCU Executed Instruction Mix' > "${MD_OUT}"

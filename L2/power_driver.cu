@@ -2,7 +2,7 @@
 // One process owns the held allocation, L2 buffer, warmup graph, measurement
 // graph, and NVML sampler so precondition and measurement share the same cache.
 #include "common.cuh"
-#include "../../measure/power_telemetry.hpp"
+#include "../common/power_telemetry.hpp"
 
 #include <nvml.h>
 #include <nvtx3/nvToolsExt.h>

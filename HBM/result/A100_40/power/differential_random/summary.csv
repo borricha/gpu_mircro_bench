@@ -1,0 +1,36 @@
+metric,value,unit,method
+method,fixed graph work; r2-r1 energy difference,,P_const/P_static subtracted per actual duration
+sass_count_scale,1.0,scale,applied to raw instruction counts before attribution
+xor_delta_lop3_count,17034041622528.0,warp LOP3,xor-only r2-r1
+load_delta_ldg_count,175814737920.0,warp LDG,load-xor r2-r1
+load_delta_lop3_count,87907368960.0,warp LOP3,load-xor r2-r1
+lop3_per_added_ldg,0.5,warp LOP3/warp LDG,load-xor r2-r1; NCU-verified 0.5 for the retained load-xor kernel
+lop3_energy_board,727.9442930816472,pJ/warp LOP3,raw board-energy delta
+hbm_ldg_e128_energy_board,84986.1874210576,pJ/warp LDG.E.128,raw board-energy delta
+hbm_ldg_e128_energy_board,20.748580913344142,pJ/logical bit,512 B per warp LDG.E.128
+lop3_energy_after_const,619.7107048881845,pJ/warp LOP3,r2-r1 after P_const
+hbm_ldg_e128_energy_after_const,73719.2879686598,pJ/warp LDG.E.128,load delta minus 0.5 × LOP3
+hbm_ldg_e128_energy_after_const,17.997873039223585,pJ/logical bit,512 B per warp LDG.E.128
+lop3_energy_after_const_static,509.27136048341777,pJ/warp LOP3,r2-r1 after P_const + P_static
+hbm_ldg_e128_energy_after_const_static,62222.77371863184,pJ/warp LDG.E.128,load delta minus 0.5 × LOP3
+hbm_ldg_e128_energy_after_const_static,15.191106864900352,pJ/logical bit,512 B per warp LDG.E.128
+l2_direct_ldg_energy_after_const_reference,5.007280547,pJ/bit,L2 random direct LDG.E.32 result from the same A100_40 campaign
+hbm_only_energy_after_const,12.990592492,pJ/bit,HBM direct LDG.E.128 minus matching L2 direct LDG.E.32
+l2_direct_ldg_energy_after_const_static_reference,4.243731676,pJ/bit,L2 random direct LDG.E.32 result after P_const and P_static subtraction
+hbm_only_energy_after_const_static,10.947375189,pJ/bit,HBM direct LDG.E.128 minus matching L2 direct LDG.E.32 after P_const and P_static subtraction
+xor-only_r1_board_power,221.298981086,W,mean across repetitions
+xor-only_r1_throttle,0.0,%,NVML samples
+xor-only_r1_sm_clock,1410.0,MHz,NVML samples
+xor-only_r1_mem_clock,1215.0,MHz,NVML samples
+xor-only_r2_board_power,221.8837276385,W,mean across repetitions
+xor-only_r2_throttle,0.0,%,NVML samples
+xor-only_r2_sm_clock,1410.0,MHz,NVML samples
+xor-only_r2_mem_clock,1215.0,MHz,NVML samples
+load-xor_r1_board_power,249.34561225649998,W,mean across repetitions
+load-xor_r1_throttle,99.75,%,NVML samples
+load-xor_r1_sm_clock,1378.31,MHz,NVML samples
+load-xor_r1_mem_clock,1215.0,MHz,NVML samples
+load-xor_r2_board_power,249.385341576,W,mean across repetitions
+load-xor_r2_throttle,100.0,%,NVML samples
+load-xor_r2_sm_clock,1369.210635819,MHz,NVML samples
+load-xor_r2_mem_clock,1215.0,MHz,NVML samples

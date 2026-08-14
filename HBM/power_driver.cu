@@ -2,7 +2,7 @@
 // kernels. It reuses common.cuh, so NCU and power execute the same
 // load-xor/xor-only device code.
 #include "common.cuh"
-#include "../../measure/power_telemetry.hpp"
+#include "../common/power_telemetry.hpp"
 
 #include <nvml.h>
 #include <nvtx3/nvToolsExt.h>

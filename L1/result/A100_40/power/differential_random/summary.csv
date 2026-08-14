@@ -1,0 +1,5 @@
+metric,value,unit,method
+control_energy_after_const,13.195143249,pJ/LOP3,delta xor-only
+ldg_energy_after_const,0.998588535,pJ/bit,load delta minus control delta
+control_energy_after_const_static,9.743936761,pJ/LOP3,delta xor-only
+ldg_energy_after_const_static,0.808903513,pJ/bit,load delta minus control delta

@@ -1,0 +1,9 @@
+metric,value,unit,method
+control_energy_after_const,14.294103253,pJ/LOP3,delta xor-only
+ldg_energy_after_const,5.007280547,pJ/bit,load delta minus control delta
+control_energy_after_const_static,10.829434811,pJ/LOP3,delta xor-only
+ldg_energy_after_const_static,4.243731676,pJ/bit,load delta minus control delta
+l1_direct_ldg_energy_after_const_reference,0.998588535,pJ/bit,L1 random direct LDG.E.32 result from the same A100_40 campaign
+l2_only_energy_after_const,4.008692012,pJ/bit,L2 direct LDG.E.32 minus matching L1 direct LDG.E.32
+l1_direct_ldg_energy_after_const_static_reference,0.808903513,pJ/bit,L1 random direct LDG.E.32 result after P_const and P_static subtraction
+l2_only_energy_after_const_static,3.434828163,pJ/bit,L2 direct LDG.E.32 minus matching L1 direct LDG.E.32 after P_const and P_static subtraction

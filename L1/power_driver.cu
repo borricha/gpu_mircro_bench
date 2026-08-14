@@ -2,7 +2,7 @@
 // This uses the same measurement framing as the L2 harness: one process owns
 // allocation, warm-up graph, measurement graph, CUDA events, and NVML samples.
 #include "common.cuh"
-#include "../../measure/power_telemetry.hpp"
+#include "../common/power_telemetry.hpp"
 
 #include <nvml.h>
 
