@@ -18,15 +18,10 @@ namespace hbmv2 {
 #define HBM_XOR32 HBM_XOR16 HBM_XOR16
 #define HBM_ISSUE_XOR_PASS(x, y, z, w) \
   asm volatile("{\n" HBM_XOR32 "}" : "+r"(x), "+r"(y), "+r"(z), "+r"(w))
-#define HBM_XOR_BRANCH_PADDING(rounds) \
-  asm volatile("{\n" "  .reg .pred xor_pad_pred;\n" \
-               "  setp.ge.s32 xor_pad_pred, %0, 0;\n" \
-               "  @xor_pad_pred bra xor_pad_done;\n" "  trap;\n" \
-               "xor_pad_done:\n" "}" :: "r"(rounds))
-
-// LOP3-only control for the HBM differential. It preserves the same group
-// loop and round branch as hbmLoadDominantKernel, but emits no data load.
-__global__ void hbmXorOnlyKernel(size_t groups, int rounds, int innerRepeats) {
+// LOP3-only control for the L2-style HBM mapping. It has the same repeat and
+// group loops as hbmLoadDominantKernel; R2 only appends one static LOP3 pass.
+template <int ActiveLoads>
+__global__ void hbmXorOnlyKernel(size_t groups, int innerRepeats) {
   const std::uint32_t lane = threadIdx.x;
   std::uint32_t x = lane ^ 0x12345678u;
   std::uint32_t y = lane ^ 0x9abcdef0u;
@@ -38,11 +33,8 @@ __global__ void hbmXorOnlyKernel(size_t groups, int rounds, int innerRepeats) {
 #pragma unroll 1
     for (size_t group = 0; group < groups; ++group) {
       HBM_ISSUE_XOR_PASS(x, y, z, w);
-      if (rounds > 1) {
+      if constexpr (ActiveLoads == 2 * kScalarLoadsPerRound) {
         HBM_ISSUE_XOR_PASS(x, y, z, w);
-        HBM_XOR_BRANCH_PADDING(rounds);
-      } else {
-        HBM_XOR_BRANCH_PADDING(rounds);
       }
     }
   }
@@ -51,7 +43,12 @@ __global__ void hbmXorOnlyKernel(size_t groups, int rounds, int innerRepeats) {
 
 inline void launchXorOnly(size_t groups, int blocks, int rounds,
                           int innerRepeats, cudaStream_t stream) {
-  hbmXorOnlyKernel<<<blocks, kThreads, 0, stream>>>(groups, rounds, innerRepeats);
+  if (rounds == 1)
+    hbmXorOnlyKernel<kScalarLoadsPerRound><<<blocks, kThreads, 0, stream>>>(
+        groups, innerRepeats);
+  else
+    hbmXorOnlyKernel<2 * kScalarLoadsPerRound><<<blocks, kThreads, 0, stream>>>(
+        groups, innerRepeats);
   CUDA_CHECK(cudaGetLastError());
 }
 
@@ -62,7 +59,6 @@ inline void launchXorOnly(size_t groups, int blocks, int rounds,
 #undef HBM_XOR16
 #undef HBM_XOR32
 #undef HBM_ISSUE_XOR_PASS
-#undef HBM_XOR_BRANCH_PADDING
 
 #ifndef HBM_XOR_ONLY_DEVICE_ONLY
 namespace {
@@ -74,10 +70,9 @@ void run(const Options& options) {
   CUDA_CHECK(cudaGetDeviceProperties(&prop, options.device));
   const size_t bytes = options.mib * 1024ull * 1024ull;
   if (bytes <= static_cast<size_t>(prop.l2CacheSize)) fail("--mib must exceed L2 size");
-  const size_t count = bytes / sizeof(packed_fp32);
   const int blocks = prop.multiProcessorCount * options.blocksPerSm;
-  const size_t gridStride = static_cast<size_t>(blocks) * kThreads;
-  const size_t groups = count / (gridStride * kScalarLoadsPerGroup);
+  const size_t groupBytes = static_cast<size_t>(blocks) * kWordsPerRegion * sizeof(std::uint32_t);
+  const size_t groups = bytes / groupBytes;
   if (groups == 0) fail("buffer too small for HBM stream geometry");
   const int rounds = options.activeLoads / kScalarLoadsPerRound;
 
@@ -105,7 +100,7 @@ void run(const Options& options) {
   CUDA_CHECK(cudaEventDestroy(start)); CUDA_CHECK(cudaEventDestroy(stop));
   const double best = *std::min_element(milliseconds.begin(), milliseconds.end());
   const double logicalLop3 = static_cast<double>(options.activeLoads) / 2.0 *
-      static_cast<double>(groups) * gridStride;
+      static_cast<double>(groups) * blocks * kThreads;
   std::cout << std::fixed << std::setprecision(3)
             << "kernel=hbmXorOnlyKernel rounds=" << rounds
             << " groups=" << groups << " blocks=" << blocks << " kernel_ms=" << best

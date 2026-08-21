@@ -1,0 +1,32 @@
+metric,value,unit,method
+method,fixed graph work; r2-r1 energy difference,,P_const/P_static subtracted per actual duration
+sass_count_scale,1.0,scale,applied to raw instruction counts before attribution
+xor_delta_lop3_count,14409107767296.0,warp LOP3,xor-only r2-r1
+load_delta_ldg_count,715036557312.0,warp LDG,load-xor r2-r1
+load_delta_lop3_count,357518278656.0,warp LOP3,load-xor r2-r1
+lop3_per_added_ldg,0.5,warp LOP3/warp LDG,load-xor r2-r1; NCU-verified 0.5 for the retained load-xor kernel
+lop3_energy_board,747.4544348991718,pJ/warp LOP3,raw board-energy delta
+hbm_ldg_e32_energy_board,23559.303587427,pJ/warp LDG.E.32,raw board-energy delta
+hbm_ldg_e32_energy_board,23.00713240959668,pJ/logical bit,128 B per warp LDG.E.32
+lop3_energy_after_const,640.0921243376062,pJ/warp LOP3,r2-r1 after P_const
+hbm_ldg_e32_energy_after_const,20433.263207254276,pJ/warp LDG.E.32,load delta minus 0.5 × LOP3
+hbm_ldg_e32_energy_after_const,19.954358600834254,pJ/logical bit,128 B per warp LDG.E.32
+lop3_energy_after_const_static,529.6566753094102,pJ/warp LOP3,r2-r1 after P_const + P_static
+hbm_ldg_e32_energy_after_const_static,17217.743056290732,pJ/warp LDG.E.32,load delta minus 0.5 × LOP3
+hbm_ldg_e32_energy_after_const_static,16.814202203408918,pJ/logical bit,128 B per warp LDG.E.32
+xor-only_r1_board_power,218.07146581249998,W,mean across repetitions
+xor-only_r1_throttle,0.0,%,NVML samples
+xor-only_r1_sm_clock,1410.0,MHz,NVML samples
+xor-only_r1_mem_clock,1215.0,MHz,NVML samples
+xor-only_r2_board_power,223.6461475015,W,mean across repetitions
+xor-only_r2_throttle,0.0,%,NVML samples
+xor-only_r2_sm_clock,1410.0,MHz,NVML samples
+xor-only_r2_mem_clock,1215.0,MHz,NVML samples
+load-xor_r1_board_power,249.532679332,W,mean across repetitions
+load-xor_r1_throttle,100.0,%,NVML samples
+load-xor_r1_sm_clock,1322.298646146,MHz,NVML samples
+load-xor_r1_mem_clock,1215.0,MHz,NVML samples
+load-xor_r2_board_power,249.5379247675,W,mean across repetitions
+load-xor_r2_throttle,100.0,%,NVML samples
+load-xor_r2_sm_clock,1325.0592509130001,MHz,NVML samples
+load-xor_r2_mem_clock,1215.0,MHz,NVML samples

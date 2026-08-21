@@ -18,15 +18,16 @@ of logical data.
 - CTA: 256 threads = **8 warps**.
 - Input: deterministic random `uint4` bit patterns by default. Use random for
   HBM attribution because all-zero data can change memory-compression behavior.
-- The buffer is split into complete stream groups of
-  `864 CTAs × 256 threads × 128 scalar-load slots`. For a 1 GiB allocation this is
-  two complete groups; a partial tail is intentionally unused.
+- A group gives every CTA one 128 KiB region. R1 reads the first 64 KiB and
+  R2 reads both 64 KiB halves through compile-time scalar offsets. For a 1 GiB
+  allocation this yields nine complete groups; the small tail is unused.
 
-The compile-time inline-PTX body removes per-load index arithmetic. One pass
-issues exactly **64 LDG.E.32 + 32 LOP3 per thread**. R1 uses one pass
-(`--active-loads 64`); R2 uses two passes (`--active-loads 128`). The R1
-no-load slot executes matched cursor, predicate, branch, and integer padding
-so NCU can isolate the intended R2−R1 increment:
+The compile-time static body removes per-load index arithmetic. One pass
+issues exactly **64 LDG.E.32 + 32 LOP3 per thread**. R1 uses the first half
+of its CTA region (`--active-loads 64`); R2 appends the second static half
+(`--active-loads 128`). The group loop and region-base calculation are shared
+by both kernels, so NCU isolates the intended R2−R1 increment without
+integer padding:
 
 ```text
 R2 − R1 = +64 warp LDG.E.32 +32 warp LOP3 per warp/group
@@ -49,8 +50,8 @@ logical bytes(R1) = G × I × 6,912 warps × 64 LDG × 128 B
 logical bytes(R2) = G × I × 6,912 warps × 128 LDG × 128 B
 ```
 
-For `--mib 1024`, `G = 2`; therefore one R1 launch issues 113,246,208 B
-(0.10546875 GiB) and one R2 launch issues 226,492,416 B (0.2109375 GiB).
+For `--mib 1024`, `G = 9`; therefore one R1 launch issues 509,607,936 B
+(0.474609375 GiB) and one R2 launch issues 1,019,215,872 B (0.94921875 GiB).
 
 Let `ΔE_xor = E(xor R2) − E(xor R1)` and
 `ΔE_load = E(load R2) − E(load R1)`, measured with equal graph work. The

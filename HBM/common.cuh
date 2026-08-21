@@ -32,6 +32,12 @@ constexpr int kDominantFixedGridBlocks = 864;  // 108 SMs x 8 CTAs/SM.
 constexpr int kScalarLoadsPerRound = 64;
 constexpr int kMaxRounds = 2;
 constexpr int kScalarLoadsPerGroup = kScalarLoadsPerRound * kMaxRounds;
+constexpr int kLoadPairsPerRound = kScalarLoadsPerRound / 2;
+// One CTA owns a 128 KiB region: R1 reads its first half and R2 reads both
+// halves. This keeps every static load offset small while groups sweep 1 GiB.
+constexpr size_t kWordsPerRegion =
+    static_cast<size_t>(kScalarLoadsPerGroup) * kThreads;
+constexpr size_t kPairStrideWords = static_cast<size_t>(2) * kThreads;
 
 struct Options {
   int device = 0;

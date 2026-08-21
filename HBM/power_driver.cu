@@ -154,8 +154,8 @@ void runPowerTrial(const PowerOptions& options) {
   const int blocks = prop.multiProcessorCount * options.blocksPerSm;
   if (options.kind == "load-xor" && blocks != kDominantFixedGridBlocks)
     failPower("load-xor requires 108 SM x 8 blocks/SM (864 blocks) on this A100");
-  const size_t gridStride = static_cast<size_t>(blocks) * kThreads;
-  const size_t groups = count / (gridStride * kScalarLoadsPerGroup);
+  const size_t groupBytes = static_cast<size_t>(blocks) * kWordsPerRegion * sizeof(std::uint32_t);
+  const size_t groups = bytes / groupBytes;
   if (groups == 0) failPower("buffer too small for HBM stream geometry");
   const int rounds = options.activeLoads / kScalarLoadsPerRound;
 

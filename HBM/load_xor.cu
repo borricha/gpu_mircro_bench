@@ -9,92 +9,48 @@
 
 namespace hbmv2 {
 
-// The static PTX body avoids an address-calculation instruction between
-// individual loads. Each pair is two explicit scalar global loads and one
-// LOP3, exactly matching the L1/L2 differential ratio. Do not use v4.u32
-// here: ptxas may scalarize a partially consumed vector load.
-#define HBM_LOAD_PAIR(first, second) \
-  "  ld.global.u32 %0, [%2+" #first "];\n" \
-  "  ld.global.u32 %1, [%2+" #second "];\n" \
-  "  lop3.b32 %3, %3, %0, %1, 0x96;\n"
-#define HBM_LOAD_PASS \
-  HBM_LOAD_PAIR(0x0, 0x360000) HBM_LOAD_PAIR(0x6c0000, 0xa20000) \
-  HBM_LOAD_PAIR(0xd80000, 0x10e0000) HBM_LOAD_PAIR(0x1440000, 0x17a0000) \
-  HBM_LOAD_PAIR(0x1b00000, 0x1e60000) HBM_LOAD_PAIR(0x21c0000, 0x2520000) \
-  HBM_LOAD_PAIR(0x2880000, 0x2be0000) HBM_LOAD_PAIR(0x2f40000, 0x32a0000) \
-  HBM_LOAD_PAIR(0x3600000, 0x3960000) HBM_LOAD_PAIR(0x3cc0000, 0x4020000) \
-  HBM_LOAD_PAIR(0x4380000, 0x46e0000) HBM_LOAD_PAIR(0x4a40000, 0x4da0000) \
-  HBM_LOAD_PAIR(0x5100000, 0x5460000) HBM_LOAD_PAIR(0x57c0000, 0x5b20000) \
-  HBM_LOAD_PAIR(0x5e80000, 0x61e0000) HBM_LOAD_PAIR(0x6540000, 0x68a0000) \
-  HBM_LOAD_PAIR(0x6c00000, 0x6f60000) HBM_LOAD_PAIR(0x72c0000, 0x7620000) \
-  HBM_LOAD_PAIR(0x7980000, 0x7ce0000) HBM_LOAD_PAIR(0x8040000, 0x83a0000) \
-  HBM_LOAD_PAIR(0x8700000, 0x8a60000) HBM_LOAD_PAIR(0x8dc0000, 0x9120000) \
-  HBM_LOAD_PAIR(0x9480000, 0x97e0000) HBM_LOAD_PAIR(0x9b40000, 0x9ea0000) \
-  HBM_LOAD_PAIR(0xa200000, 0xa560000) HBM_LOAD_PAIR(0xa8c0000, 0xac20000) \
-  HBM_LOAD_PAIR(0xaf80000, 0xb2e0000) HBM_LOAD_PAIR(0xb640000, 0xb9a0000) \
-  HBM_LOAD_PAIR(0xbd00000, 0xc060000) HBM_LOAD_PAIR(0xc3c0000, 0xc720000) \
-  HBM_LOAD_PAIR(0xca80000, 0xcde0000) HBM_LOAD_PAIR(0xd140000, 0xd4a0000)
+__device__ __forceinline__ std::uint32_t loadHbmWord(const std::uint32_t* address) {
+  std::uint32_t value;
+  asm volatile("ld.global.u32 %0, [%1];" : "=r"(value) : "l"(address) : "memory");
+  return value;
+}
 
-#define HBM_ISSUE_LOAD_PASS(state, cursor) do { \
-  [[maybe_unused]] std::uint32_t a, b; \
-  asm volatile("{\n" HBM_LOAD_PASS "}" \
-      : "=&r"(a), "=&r"(b), "+l"(cursor), "+r"(state) \
-      : : "memory"); \
-  asm volatile("add.u64 %0, %0, 0x0d800000;" : "+l"(cursor)); \
-} while (false)
+__device__ __forceinline__ std::uint32_t xorThreeWords(
+    std::uint32_t state, std::uint32_t first, std::uint32_t second) {
+  std::uint32_t result;
+  asm volatile("lop3.b32 %0, %1, %2, %3, 0x96;"
+               : "=r"(result) : "r"(state), "r"(first), "r"(second));
+  return result;
+}
 
-#define HBM_R1_ADD4 \
-  "  add.u32 %0, %0, %1;\n" "  add.u32 %0, %0, %1;\n" \
-  "  add.u32 %0, %0, %1;\n" "  add.u32 %0, %0, %1;\n"
-#define HBM_R1_MAD4 \
-  "  mad.lo.u32 %0, %0, 0x5bd1e995, %1;\n" \
-  "  mad.lo.u32 %0, %0, 0x5bd1e995, %1;\n" \
-  "  mad.lo.u32 %0, %0, 0x5bd1e995, %1;\n" \
-  "  mad.lo.u32 %0, %0, 0x5bd1e995, %1;\n"
-#define HBM_R1_PADDING(state, seed, rounds) do { \
-  asm volatile("{\n" HBM_R1_ADD4 HBM_R1_ADD4 HBM_R1_ADD4 HBM_R1_ADD4 \
-               HBM_R1_ADD4 HBM_R1_ADD4 HBM_R1_ADD4 HBM_R1_MAD4 \
-               HBM_R1_MAD4 HBM_R1_MAD4 HBM_R1_MAD4 \
-               "  .reg .pred r1_pad_pred;\n" \
-               "  setp.ge.s32 r1_pad_pred, %2, 0;\n" \
-               "  @r1_pad_pred add.u32 %0, %0, %1;\n" \
-               "  @r1_pad_pred bra r1_pad_done;\n" \
-               "  trap;\n" "r1_pad_done:\n" "}" \
-               : "+r"(state) : "r"(seed), "r"(rounds)); \
-} while (false)
-#define HBM_R2_PADDING(state, seed, rounds) do { \
-  asm volatile("{\n" "  .reg .pred r2_pad_pred;\n" \
-               "  setp.ge.s32 r2_pad_pred, %1, 0;\n" \
-               "  @r2_pad_pred bra r2_pad_done;\n" "  trap;\n" \
-               "r2_pad_done:\n" \
-               "  mad.lo.u32 %0, %0, 0x5bd1e995, %2;\n" "}" \
-               : "+r"(state) : "r"(rounds), "r"(seed)); \
-} while (false)
+// This is the L2-style static offset body. The largest offset is below the
+// 128 KiB CTA region, so ptxas does not need a new large-plane base for R2.
+template <int Pair, int Remaining>
+__device__ __forceinline__ void runStaticLoadXorPairs(
+    std::uint32_t& state, const std::uint32_t* regionBase) {
+  constexpr size_t offset = static_cast<size_t>(Pair) * kPairStrideWords;
+  const auto first = loadHbmWord(regionBase + offset);
+  const auto second = loadHbmWord(regionBase + offset + kThreads);
+  state = xorThreeWords(state, first, second);
+  if constexpr (Remaining > 1)
+    runStaticLoadXorPairs<Pair + 1, Remaining - 1>(state, regionBase);
+}
 
-// Core HBM differential kernel. The fixed 108-SM x 8-CTA/SM geometry, loop,
-// cursor progression, predicate, and integer padding are shared by R1/R2.
-// The only intended variable body is the second 64-LDG.E.32 + 32-LOP3 pass.
+template <int ActiveLoads>
 __global__ void hbmLoadDominantKernel(const packed_fp32* __restrict__ data,
-                                      size_t groups, int rounds,
-                                      int innerRepeats) {
-  const size_t initial = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+                                      size_t groups, int innerRepeats) {
+  const auto* words = reinterpret_cast<const std::uint32_t*>(data);
   std::uint32_t state = 0x6d2b79f5u ^ threadIdx.x;
-  const std::uint32_t seed = 0x9e3779b9u ^ blockIdx.x;
 
 #pragma unroll 1
   for (int repeat = 0; repeat < innerRepeats; ++repeat) {
-    const std::uint32_t* cursor =
-        reinterpret_cast<const std::uint32_t*>(data) + initial;
 #pragma unroll 1
     for (size_t group = 0; group < groups; ++group) {
-      HBM_ISSUE_LOAD_PASS(state, cursor);
-      if (rounds > 1) {
-        HBM_ISSUE_LOAD_PASS(state, cursor);
-        HBM_R2_PADDING(state, seed, rounds);
-      } else {
-        asm volatile("add.u64 %0, %0, 0x0d800000;" : "+l"(cursor));
-        HBM_R1_PADDING(state, seed, rounds);
-      }
+      const size_t region = group * gridDim.x + blockIdx.x;
+      const auto* regionBase = words + region * kWordsPerRegion + threadIdx.x;
+      runStaticLoadXorPairs<0, kLoadPairsPerRound>(state, regionBase);
+      if constexpr (ActiveLoads == 2 * kScalarLoadsPerRound)
+        runStaticLoadXorPairs<kLoadPairsPerRound, kLoadPairsPerRound>(state, regionBase);
     }
   }
   if (state == 0xffffffffu) asm volatile("trap;");
@@ -102,20 +58,16 @@ __global__ void hbmLoadDominantKernel(const packed_fp32* __restrict__ data,
 
 inline void launchLoadDominant(const packed_fp32* data, size_t groups, int blocks,
                                int rounds, int innerRepeats, cudaStream_t stream) {
-  hbmLoadDominantKernel<<<blocks, kThreads, 0, stream>>>(
-      data, groups, rounds, innerRepeats);
+  if (rounds == 1)
+    hbmLoadDominantKernel<kScalarLoadsPerRound><<<blocks, kThreads, 0, stream>>>(
+        data, groups, innerRepeats);
+  else
+    hbmLoadDominantKernel<2 * kScalarLoadsPerRound><<<blocks, kThreads, 0, stream>>>(
+        data, groups, innerRepeats);
   CUDA_CHECK(cudaGetLastError());
 }
 
 }  // namespace hbmv2
-
-#undef HBM_LOAD_PAIR
-#undef HBM_LOAD_PASS
-#undef HBM_ISSUE_LOAD_PASS
-#undef HBM_R1_ADD4
-#undef HBM_R1_MAD4
-#undef HBM_R1_PADDING
-#undef HBM_R2_PADDING
 
 #ifndef HBM_LOAD_XOR_DEVICE_ONLY
 namespace {
@@ -131,10 +83,8 @@ void run(const Options& options) {
   const int blocks = prop.multiProcessorCount * options.blocksPerSm;
   if (blocks != kDominantFixedGridBlocks)
     fail("load-xor requires 108 SM x 8 blocks/SM (864 blocks) on this A100");
-  const size_t gridStride = static_cast<size_t>(blocks) * kThreads;
-  // Reserve space for the complete r2 two-pass stream. Any tail smaller than
-  // a complete group is deliberately left untouched.
-  const size_t groups = count / (gridStride * kScalarLoadsPerGroup);
+  const size_t groupBytes = static_cast<size_t>(blocks) * kWordsPerRegion * sizeof(std::uint32_t);
+  const size_t groups = bytes / groupBytes;
   if (groups == 0) fail("buffer too small for HBM stream geometry");
   packed_fp32* data = nullptr;
   CUDA_CHECK(cudaMalloc(&data, bytes));
@@ -166,7 +116,7 @@ void run(const Options& options) {
   const double best = *std::min_element(milliseconds.begin(), milliseconds.end());
   // A scalar load returns 4 B per lane, i.e. 128 B per warp LDG.E.32.
   const double logicalBytes = static_cast<double>(options.activeLoads) *
-      sizeof(std::uint32_t) * static_cast<double>(groups) * gridStride;
+      sizeof(std::uint32_t) * static_cast<double>(groups) * blocks * kThreads;
   std::cout << std::fixed << std::setprecision(3)
             << "kernel=hbmLoadDominantKernel rounds=" << rounds
             << " groups=" << groups << " blocks=" << blocks << " kernel_ms=" << best
