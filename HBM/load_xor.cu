@@ -1,5 +1,5 @@
 // HBM v2 LDG-dominant load-xor differential kernel.
-// Each pair of vector loads feeds one LOP3, so a pass has 64 LDG.E.128 and
+// Each pair of scalar loads feeds one LOP3, so a pass has 64 LDG.E.32 and
 // 32 LOP3. NCU verifies these counts at the executed warp-opcode level.
 #include "common.cuh"
 
@@ -10,13 +10,13 @@
 namespace hbmv2 {
 
 // The static PTX body avoids an address-calculation instruction between
-// individual loads. Each pair is two ordinary cacheable LDG.E.128
-// instructions and one LOP3.  The 1 GiB stream is much larger than L1/L2;
-// NCU confirms this access pattern has a 0% L1 hit rate and reads DRAM.
+// individual loads. Each pair is two explicit scalar global loads and one
+// LOP3, exactly matching the L1/L2 differential ratio. Do not use v4.u32
+// here: ptxas may scalarize a partially consumed vector load.
 #define HBM_LOAD_PAIR(first, second) \
-  "  ld.global.v4.u32 {%0, %1, %2, %3}, [%8+" #first "];\n" \
-  "  ld.global.v4.u32 {%4, %5, %6, %7}, [%8+" #second "];\n" \
-  "  lop3.b32 %9, %9, %0, %4, 0x96;\n"
+  "  ld.global.u32 %0, [%2+" #first "];\n" \
+  "  ld.global.u32 %1, [%2+" #second "];\n" \
+  "  lop3.b32 %3, %3, %0, %1, 0x96;\n"
 #define HBM_LOAD_PASS \
   HBM_LOAD_PAIR(0x0, 0x360000) HBM_LOAD_PAIR(0x6c0000, 0xa20000) \
   HBM_LOAD_PAIR(0xd80000, 0x10e0000) HBM_LOAD_PAIR(0x1440000, 0x17a0000) \
@@ -36,10 +36,9 @@ namespace hbmv2 {
   HBM_LOAD_PAIR(0xca80000, 0xcde0000) HBM_LOAD_PAIR(0xd140000, 0xd4a0000)
 
 #define HBM_ISSUE_LOAD_PASS(state, cursor) do { \
-  [[maybe_unused]] std::uint32_t a, b, c, d, e, f, g, h; \
+  [[maybe_unused]] std::uint32_t a, b; \
   asm volatile("{\n" HBM_LOAD_PASS "}" \
-      : "=&r"(a), "=&r"(b), "=&r"(c), "=&r"(d), \
-        "=&r"(e), "=&r"(f), "=&r"(g), "=&r"(h), "+l"(cursor), "+r"(state) \
+      : "=&r"(a), "=&r"(b), "+l"(cursor), "+r"(state) \
       : : "memory"); \
   asm volatile("add.u64 %0, %0, 0x0d800000;" : "+l"(cursor)); \
 } while (false)
@@ -74,7 +73,7 @@ namespace hbmv2 {
 
 // Core HBM differential kernel. The fixed 108-SM x 8-CTA/SM geometry, loop,
 // cursor progression, predicate, and integer padding are shared by R1/R2.
-// The only intended variable body is the second 64-LDG.E.128 + 32-LOP3 pass.
+// The only intended variable body is the second 64-LDG.E.32 + 32-LOP3 pass.
 __global__ void hbmLoadDominantKernel(const packed_fp32* __restrict__ data,
                                       size_t groups, int rounds,
                                       int innerRepeats) {
@@ -84,7 +83,8 @@ __global__ void hbmLoadDominantKernel(const packed_fp32* __restrict__ data,
 
 #pragma unroll 1
   for (int repeat = 0; repeat < innerRepeats; ++repeat) {
-    const packed_fp32* cursor = data + initial;
+    const std::uint32_t* cursor =
+        reinterpret_cast<const std::uint32_t*>(data) + initial;
 #pragma unroll 1
     for (size_t group = 0; group < groups; ++group) {
       HBM_ISSUE_LOAD_PASS(state, cursor);
@@ -134,7 +134,7 @@ void run(const Options& options) {
   const size_t gridStride = static_cast<size_t>(blocks) * kThreads;
   // Reserve space for the complete r2 two-pass stream. Any tail smaller than
   // a complete group is deliberately left untouched.
-  const size_t groups = count / (gridStride * kVectorsPerGroup);
+  const size_t groups = count / (gridStride * kScalarLoadsPerGroup);
   if (groups == 0) fail("buffer too small for HBM stream geometry");
   packed_fp32* data = nullptr;
   CUDA_CHECK(cudaMalloc(&data, bytes));
@@ -142,7 +142,7 @@ void run(const Options& options) {
   initBits<<<initBlocks, kThreads>>>(data, count, inputMode(options.input));
   CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
-  const int rounds = options.activeLoads / kVectorLoadsPerRound;
+  const int rounds = options.activeLoads / kScalarLoadsPerRound;
   // Establish page mappings and the steady-state stream before timing.
   launchLoadDominant(data, groups, blocks, rounds, 1, nullptr);
   CUDA_CHECK(cudaDeviceSynchronize());
@@ -164,9 +164,9 @@ void run(const Options& options) {
   CUDA_CHECK(cudaEventDestroy(start));
   CUDA_CHECK(cudaEventDestroy(stop));
   const double best = *std::min_element(milliseconds.begin(), milliseconds.end());
-  // A vector load returns 16 B per lane, i.e. 512 B per warp LDG.E.128.
+  // A scalar load returns 4 B per lane, i.e. 128 B per warp LDG.E.32.
   const double logicalBytes = static_cast<double>(options.activeLoads) *
-      sizeof(packed_fp32) * static_cast<double>(groups) * gridStride;
+      sizeof(std::uint32_t) * static_cast<double>(groups) * gridStride;
   std::cout << std::fixed << std::setprecision(3)
             << "kernel=hbmLoadDominantKernel rounds=" << rounds
             << " groups=" << groups << " blocks=" << blocks << " kernel_ms=" << best
@@ -182,7 +182,7 @@ int main(int argc, char** argv) {
   catch (const std::exception& error) {
     if (std::string(error.what()) == "help") {
       hbmv2::printUsage(argv[0],
-                         "HBM LDG-dominant: r2-r1 adds 64 LDG.v4 + 32 LOP3; "
+                         "HBM LDG-dominant: r2-r1 adds 64 scalar LDG + 32 LOP3; "
                          "all other executed SASS opcodes are balanced.");
       return EXIT_SUCCESS;
     }

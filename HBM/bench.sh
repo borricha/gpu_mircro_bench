@@ -28,7 +28,7 @@ Kernel options include:
   --input <zero|random|one-point-one> --trials N
 
 active-loads=64 is r1 and 128 is r2. `load-xor` is the final LDG-dominant
-variant: r2 adds 64 vector LDG + 32 LOP3 per thread/group; r1 padding
+variant: r2 adds 64 scalar LDG.E.32 + 32 LOP3 per thread/group; r1 padding
 balances every other executed SASS opcode.
 EOF
 }
@@ -197,7 +197,7 @@ Usage: ./bench.sh differential [options]
 For each kernel kind, r1 is first calibrated to approximately the requested
 duration.  The resulting graph-node count and inner-repeat count are then
 held fixed for r1 and r2.  The summary derives LOP3 pJ/warp-instruction from
-the XOR pair and HBM LDG.E.128 pJ/warp-instruction from `load-xor`. The
+the XOR pair and HBM LDG.E.32 pJ/warp-instruction from `load-xor`. The
 number of varying LOP3 per added LDG is 0.5, verified from the raw
 instruction counts.
 EOF
@@ -358,9 +358,9 @@ def main(raw_path, output_path, load_kind, count_scale):
     control_static, combined_static, ldg_static = attribute("const_static_energy")
 
     def pj_per_bit(energy_j):
-        # LDG.E.128 is a 16 B per-lane vector load: one warp-level
-        # instruction corresponds to 32 × 16 B = 4096 logical bits.
-        return energy_j * 1.0e12 / 4096.0
+        # LDG.E.32 is a 4 B per-lane scalar load: one warp-level
+        # instruction corresponds to 32 × 4 B = 1024 logical bits.
+        return energy_j * 1.0e12 / 1024.0
 
     result = [
         ("method", "fixed graph work; r2-r1 energy difference", "", "P_const/P_static subtracted per actual duration"),
@@ -371,16 +371,16 @@ def main(raw_path, output_path, load_kind, count_scale):
         ("lop3_per_added_ldg", lop3_per_ldg, "warp LOP3/warp LDG",
          f"{load_kind} r2-r1; NCU-verified 0.5 for the retained load-xor kernel"),
         ("lop3_energy_board", control_board * 1.0e12, "pJ/warp LOP3", "raw board-energy delta"),
-        ("hbm_ldg_e128_energy_board", ldg_board * 1.0e12, "pJ/warp LDG.E.128", "raw board-energy delta"),
-        ("hbm_ldg_e128_energy_board", pj_per_bit(ldg_board), "pJ/logical bit", "512 B per warp LDG.E.128"),
+        ("hbm_ldg_e32_energy_board", ldg_board * 1.0e12, "pJ/warp LDG.E.32", "raw board-energy delta"),
+        ("hbm_ldg_e32_energy_board", pj_per_bit(ldg_board), "pJ/logical bit", "128 B per warp LDG.E.32"),
         ("lop3_energy_after_const", control_const * 1.0e12, "pJ/warp LOP3", "r2-r1 after P_const"),
-        ("hbm_ldg_e128_energy_after_const", ldg_const * 1.0e12, "pJ/warp LDG.E.128",
+        ("hbm_ldg_e32_energy_after_const", ldg_const * 1.0e12, "pJ/warp LDG.E.32",
          f"load delta minus {lop3_per_ldg:g} × LOP3"),
-        ("hbm_ldg_e128_energy_after_const", pj_per_bit(ldg_const), "pJ/logical bit", "512 B per warp LDG.E.128"),
+        ("hbm_ldg_e32_energy_after_const", pj_per_bit(ldg_const), "pJ/logical bit", "128 B per warp LDG.E.32"),
         ("lop3_energy_after_const_static", control_static * 1.0e12, "pJ/warp LOP3", "r2-r1 after P_const + P_static"),
-        ("hbm_ldg_e128_energy_after_const_static", ldg_static * 1.0e12, "pJ/warp LDG.E.128",
+        ("hbm_ldg_e32_energy_after_const_static", ldg_static * 1.0e12, "pJ/warp LDG.E.32",
          f"load delta minus {lop3_per_ldg:g} × LOP3"),
-        ("hbm_ldg_e128_energy_after_const_static", pj_per_bit(ldg_static), "pJ/logical bit", "512 B per warp LDG.E.128"),
+        ("hbm_ldg_e32_energy_after_const_static", pj_per_bit(ldg_static), "pJ/logical bit", "128 B per warp LDG.E.32"),
     ]
     for kind, active in required:
         p = point[(kind, active)]

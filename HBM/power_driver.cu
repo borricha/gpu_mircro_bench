@@ -155,9 +155,9 @@ void runPowerTrial(const PowerOptions& options) {
   if (options.kind == "load-xor" && blocks != kDominantFixedGridBlocks)
     failPower("load-xor requires 108 SM x 8 blocks/SM (864 blocks) on this A100");
   const size_t gridStride = static_cast<size_t>(blocks) * kThreads;
-  const size_t groups = count / (gridStride * kVectorsPerGroup);
+  const size_t groups = count / (gridStride * kScalarLoadsPerGroup);
   if (groups == 0) failPower("buffer too small for HBM stream geometry");
-  const int rounds = options.activeLoads / kVectorLoadsPerRound;
+  const int rounds = options.activeLoads / kScalarLoadsPerRound;
 
   packed_fp32* data = nullptr;
   CUDA_CHECK(cudaMalloc(&data, bytes));

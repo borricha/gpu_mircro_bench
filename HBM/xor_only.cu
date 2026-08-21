@@ -1,5 +1,5 @@
-// HBM v2 LOP3-only control slope. r1/r2 differ by exactly one 32-LOP3 pass;
-// it is the control counterpart of load_xor's extra 64-LDG pass.
+// HBM v2 LOP3-only control. R1/R2 differ by exactly one 32-LOP3 pass;
+// it is the control counterpart of load_xor's extra 64 scalar-LDG pass.
 #include "common.cuh"
 
 #ifndef HBM_XOR_ONLY_DEVICE_ONLY
@@ -77,9 +77,9 @@ void run(const Options& options) {
   const size_t count = bytes / sizeof(packed_fp32);
   const int blocks = prop.multiProcessorCount * options.blocksPerSm;
   const size_t gridStride = static_cast<size_t>(blocks) * kThreads;
-  const size_t groups = count / (gridStride * kVectorsPerGroup);
+  const size_t groups = count / (gridStride * kScalarLoadsPerGroup);
   if (groups == 0) fail("buffer too small for HBM stream geometry");
-  const int rounds = options.activeLoads / kVectorLoadsPerRound;
+  const int rounds = options.activeLoads / kScalarLoadsPerRound;
 
   // Keep the allocation/context footprint equal to load_xor. This buffer is
   // deliberately untouched by the timed XOR-only kernel.

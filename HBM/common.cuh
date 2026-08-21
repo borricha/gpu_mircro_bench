@@ -27,17 +27,17 @@ constexpr int kThreads = 256;
 constexpr int kDefaultBlocksPerSm = 8;
 constexpr int kDominantFixedGridBlocks = 864;  // 108 SMs x 8 CTAs/SM.
 
-// One differential pass contains 64 vector loads per thread. R1/R2 select
-// one/two passes, while a complete stream group reserves both passes.
-constexpr int kVectorLoadsPerRound = 64;
+// One differential pass contains 64 explicit scalar (u32) loads per thread.
+// R1/R2 select one/two passes, while a complete stream group reserves both.
+constexpr int kScalarLoadsPerRound = 64;
 constexpr int kMaxRounds = 2;
-constexpr int kVectorsPerGroup = kVectorLoadsPerRound * kMaxRounds;
+constexpr int kScalarLoadsPerGroup = kScalarLoadsPerRound * kMaxRounds;
 
 struct Options {
   int device = 0;
   size_t mib = 1024;
   int blocksPerSm = kDefaultBlocksPerSm;
-  int activeLoads = kVectorLoadsPerRound;
+  int activeLoads = kScalarLoadsPerRound;
   std::string input = "random";
   int trials = 1;
 };
@@ -72,7 +72,7 @@ inline Options parseOptions(int argc, char** argv) {
     else if (arg == "--mib") options.mib = static_cast<size_t>(parseInteger(value(), "mib"));
     else if (arg == "--blocks-per-sm") options.blocksPerSm = static_cast<int>(parseInteger(value(), "blocks-per-sm"));
     else if (arg == "--active-loads") options.activeLoads = static_cast<int>(parseInteger(value(), "active-loads"));
-    else if (arg == "--rounds") options.activeLoads = static_cast<int>(parseInteger(value(), "rounds")) * kVectorLoadsPerRound;
+    else if (arg == "--rounds") options.activeLoads = static_cast<int>(parseInteger(value(), "rounds")) * kScalarLoadsPerRound;
     else if (arg == "--trials") options.trials = static_cast<int>(parseInteger(value(), "trials"));
     else if (arg == "--input") options.input = value();
     else if (arg == "--help" || arg == "-h") fail("help");
@@ -93,7 +93,7 @@ __device__ __forceinline__ std::uint32_t mixBits(std::uint32_t x) {
   return x ^ (x >> 16);
 }
 
-// Initialize four deterministic FP32 bit patterns per uint4 vector.
+// Initialize four deterministic FP32 bit patterns per packed uint4 element.
 __global__ void initBits(packed_fp32* data, size_t count, int mode) {
   constexpr std::uint32_t kOnePointOne = 0x3f8ccccdu;
   for (size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
