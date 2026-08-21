@@ -109,11 +109,19 @@ __device__ __forceinline__ std::uint32_t loadGlobal(const float* address) {
   return __float_as_uint(*address);
 }
 
+__device__ __forceinline__ std::uint32_t xor3Bits(std::uint32_t a, std::uint32_t b,
+                                                   std::uint32_t c) {
+  std::uint32_t result;
+  asm volatile("lop3.b32 %0, %1, %2, %3, 0x96;" : "=r"(result) : "r"(a), "r"(b), "r"(c));
+  return result;
+}
+
 template <int Pair, int Remaining>
 __device__ __forceinline__ void loadPairs(std::uint32_t& checksum, const float* base) {
   constexpr size_t offset = static_cast<size_t>(Pair) * kPairStride;
-  checksum ^= loadGlobal(base + offset);
-  checksum ^= loadGlobal(base + offset + kBlockSize);
+  const std::uint32_t first = loadGlobal(base + offset);
+  const std::uint32_t second = loadGlobal(base + offset + kBlockSize);
+  checksum = xor3Bits(checksum, first, second);
   if constexpr (Remaining > 1) loadPairs<Pair + 1, Remaining - 1>(checksum, base);
 }
 
@@ -126,13 +134,6 @@ __global__ void powerLoadXorKernel(const float* __restrict__ data, int blockRun)
   loadPairs<0, kLoadsPerPass / 2>(checksum, base);
   if constexpr (ActiveLoads == 128) loadPairs<kLoadsPerPass / 2, kLoadsPerPass / 2>(checksum, base);
   if (checksum == 0xffffffffu) asm volatile("trap;");
-}
-
-__device__ __forceinline__ std::uint32_t xor3Bits(std::uint32_t a, std::uint32_t b,
-                                                   std::uint32_t c) {
-  std::uint32_t result;
-  asm volatile("lop3.b32 %0, %1, %2, %3, 0x96;" : "=r"(result) : "r"(a), "r"(b), "r"(c));
-  return result;
 }
 
 template <int Slot, int Remaining>

@@ -21,7 +21,7 @@ Usage:
   ./bench.sh nsys [single|power] <load-xor|xor-only> [options]
   ./bench.sh power [load-xor|xor-only] [power options]
   ./bench.sh differential [differential options]
-  ./bench.sh instruction-mix
+  ./bench.sh instruction-mix [--ncu-dir DIR] [--out-dir DIR]
 
 Kernel options include:
   --device N --mib N --blocks-per-sm N --active-loads <64|128>
@@ -52,6 +52,8 @@ build_power() {
 
 ensure_power_binary() {
   [[ -x "${POWER_BIN}" && "${POWER_BIN}" -nt "${ROOT_DIR}/power_driver.cu" &&
+     "${POWER_BIN}" -nt "${ROOT_DIR}/load_xor.cu" &&
+     "${POWER_BIN}" -nt "${ROOT_DIR}/xor_only.cu" &&
      "${POWER_BIN}" -nt "${ROOT_DIR}/common.cuh" ]] || build_power
 }
 
@@ -415,13 +417,21 @@ echo "Attributed SASS energy: ${SUMMARY_CSV}"
 # Kept in this dispatcher so each benchmark has a single shell entry point.
 run_instruction_mix() (
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  echo "Usage: ./bench.sh instruction-mix"
-  echo "Uses build/ncu/{xor,load}_r{1,2}_full.ncu-rep and writes CSV tables."
+  echo "Usage: ./bench.sh instruction-mix [--ncu-dir DIR] [--out-dir DIR]"
+  echo "Reads {xor,load}_r{1,2}_full.ncu-rep from --ncu-dir (default: build/ncu)."
   exit 0
 fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NCU_DIR="${ROOT_DIR}/build/ncu"
-OUT_DIR="${NCU_DIR}/executed_instruction_mix"
+OUT_DIR=""
+while (($#)); do
+  case "$1" in
+    --ncu-dir) NCU_DIR="$2"; shift 2 ;;
+    --out-dir) OUT_DIR="$2"; shift 2 ;;
+    *) echo "unknown instruction-mix option: $1" >&2; exit 2 ;;
+  esac
+done
+[[ -n "${OUT_DIR}" ]] || OUT_DIR="${NCU_DIR}/executed_instruction_mix"
 if [[ -n "${NCU:-}" ]]; then
   NCU_BIN="${NCU}"
 elif command -v ncu >/dev/null 2>&1; then

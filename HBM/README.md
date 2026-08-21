@@ -1,21 +1,73 @@
-# HBM v2 differential LDG benchmark
+# HBM differential LDG microbenchmark
 
-`load_xor.cu` is the final HBM load kernel. It uses explicit
-`ld.global.cg.v4.u32` instructions, so the data path is `LDG.E.128` and
-bypasses L1. The 1 GiB footprint exceeds A100's L2 capacity. Its r1/r2 pair
-uses the fixed 108 SM × 8 CTA/SM geometry: r2 adds 64 vector loads and 32
-`LOP3` per thread/group, while r1 padding balances the remaining executed
-SASS opcodes.
+This benchmark attributes the energy of an HBM-served load by comparing two
+otherwise balanced SASS instruction streams. It targets an A100-40 PCIe GPU
+(108 SMs) and uses a 1 GiB FP32-vector allocation, well above its 40 MiB L2
+capacity.
 
-`xor_only.cu` is the corresponding control pair. r2 adds 128 `LOP3` per
-thread/group; the energy slope of that pair is scaled by the NCU-verified
-0.5 varying `LOP3` per extra HBM LDG before attributing the remaining
-`load-xor` slope to `LDG.E.128`.
+## Load path and launch geometry
+
+`load_xor.cu` launches the core `hbmLoadDominantKernel`. It uses explicit
+`ld.global.v4.u32` inline PTX, which lowers to a normal cacheable `LDG.E.128`
+load. The 1 GiB stream is much larger than L1/L2; NCU reports a 0% L1 hit
+rate and DRAM-read traffic equal to the issued logical read volume. Each lane
+loads a 16 B `uint4` (`packed_fp32`), so one warp-level LDG.E.128 represents
+32 lanes × 16 B = **512 B** of logical data.
+
+- Grid: 108 SM × 8 CTA/SM = **864 CTAs**.
+- CTA: 256 threads = **8 warps**.
+- Input: deterministic random `uint4` bit patterns by default. Use random for
+  HBM attribution because all-zero data can change memory-compression behavior.
+- The buffer is split into complete stream groups of
+  `864 CTAs × 256 threads × 128 vector slots`. For a 1 GiB allocation this is
+  two complete groups; a partial tail is intentionally unused.
+
+The compile-time inline-PTX body removes per-load index arithmetic. One pass
+issues exactly **64 LDG.E.128 + 32 LOP3 per thread**. R1 uses one pass
+(`--active-loads 64`); R2 uses two passes (`--active-loads 128`). The R1
+no-load slot executes matched cursor, predicate, branch, and integer padding
+so NCU can isolate the intended R2−R1 increment:
+
+```text
+R2 − R1 = +64 warp LDG.E.128 +32 warp LOP3 per warp/group
+```
+
+`xor_only.cu` launches `hbmXorOnlyKernel`, the LOP3-only control. It retains
+the same grid, group loop, branch structure, and allocation footprint but
+does not issue a data load. Its R2−R1 increment is exactly **+32 LOP3 per
+warp/group**.
+
+## Documentation formulas
+
+For one `load-xor` kernel launch, where `G` is the number of complete stream
+groups and `I` is `--inner-repeats` (one for `single`):
+
+```text
+warps = 864 CTAs × (256 threads / 32) = 6,912 warps
+
+logical bytes(R1) = G × I × 6,912 warps × 64 LDG × 512 B
+logical bytes(R2) = G × I × 6,912 warps × 128 LDG × 512 B
+```
+
+For `--mib 1024`, `G = 2`; therefore one R1 launch issues 452,984,832 B
+(0.421875 GiB) and one R2 launch issues 905,969,664 B (0.84375 GiB).
+
+Let `ΔE_xor = E(xor R2) − E(xor R1)` and
+`ΔE_load = E(load R2) − E(load R1)`, measured with equal graph work. The
+per-warp-instruction attribution is:
+
+```text
+e_LOP3 = ΔE_xor / ΔN_LOP3
+e_LDG  = (ΔE_load − 0.5 × ΔN_LDG × e_LOP3) / ΔN_LDG
+pJ/bit = e_LDG / 4,096 bits
+```
+
+The `0.5` term comes from one LOP3 per two varying LDG.E.128 instructions.
 
 ## Run
 
 ```bash
-cd /scale/cal/home/kupsy/LLMInfra/micro_bench/HBM
+cd /scale/cal/home/kupsy/gpu_micro_bench/HBM
 CUDA_VISIBLE_DEVICES=0 ./bench.sh build
 CUDA_VISIBLE_DEVICES=0 ./bench.sh single load-xor --device 0 --mib 1024 \
   --blocks-per-sm 8 --active-loads 64 --input random

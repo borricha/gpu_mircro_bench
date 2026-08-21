@@ -1,4 +1,4 @@
-// L1 v2 load slope kernel: one extra pass is exactly 64 LDG + 32 LOP3.
+// L1 v2 differential load kernel: one extra pass issues 64 LDG and 32 LOP3.
 #include "common.cuh"
 
 #include <iomanip>
@@ -7,19 +7,21 @@ namespace {
 
 using namespace l1v2;
 
-// `ca`(cache all)는 global load의 반환값을 L1/TEX에 캐시하도록 요청한다.
-// float 연산으로 해석하지 않고 32-bit bit pattern 그대로 받아 data bit pattern의
-// switching 효과도 포함해 측정한다.
-__device__ __forceinline__ std::uint32_t loadCacheAllBits(const float* address) {
+constexpr int kInitBlocks = 52;
+
+// `ca` (cache all) requests that the global-load result be cached in L1/TEX.
+// Keep the result as raw bits rather than interpreting it as FP32 so the
+// experiment retains data-pattern-dependent switching behavior without FP work.
+__device__ __forceinline__ std::uint32_t loadL1CachedWord(const float* address) {
   std::uint32_t value;
   asm volatile("ld.global.ca.u32 %0, [%1];"
                : "=r"(value) : "l"(address) : "memory");
   return value;
 }
 
-// checksum의 의존성을 만드는 3-input XOR이다. LOP3 한 개가 발행되며, load 결과가
-// 이 연산의 입력이므로 컴파일러가 앞선 load를 dead-code로 지울 수 없다.
-__device__ __forceinline__ std::uint32_t xor3Bits(
+// One 3-input XOR maps to one LOP3. Because the load results feed this value,
+// the compiler cannot eliminate the preceding loads as dead code.
+__device__ __forceinline__ std::uint32_t xorThreeWords(
     std::uint32_t a, std::uint32_t b, std::uint32_t c) {
   std::uint32_t result;
   asm volatile("lop3.b32 %0, %1, %2, %3, 0x96;"
@@ -27,49 +29,53 @@ __device__ __forceinline__ std::uint32_t xor3Bits(
   return result;
 }
 
-// 한 pass = thread당 load 64개 + LOP3 32개.
-// Pair 하나가 서로 64 KiB 떨어진 두 FP32 word를 읽고 LOP3 하나로 소비한다.
-// template 재귀는 컴파일 시 완전히 펼쳐져 loop index 계산이 hot path에 남지 않는다.
+// One pass performs 64 loads and 32 LOP3 operations per thread. Each pair
+// reads two FP32 words 64 KiB apart and consumes them with one LOP3. Template
+// recursion fully unrolls the 32 pairs, keeping pair-loop index arithmetic out
+// of the hot path.
 template <int Pair, int Remaining>
-__device__ __forceinline__ void loadXorPass(std::uint32_t& checksum,
-                                            const float* B) {
-  constexpr int kOffset = Pair * kThreads;
-  const std::uint32_t a = loadCacheAllBits(B + kOffset);
-  const std::uint32_t b = loadCacheAllBits(B + kElementsPerSm / 2 + kOffset);
-  checksum = xor3Bits(checksum, a, b);
+__device__ __forceinline__ void runLoadXorPass(std::uint32_t& checksum,
+                                                const float* threadBase) {
+  constexpr int kPairOffsetElements = Pair * kThreads;
+  constexpr int kHalfWorkingSetElements = kElementsPerSm / 2;
+  const std::uint32_t lowerWord =
+      loadL1CachedWord(threadBase + kPairOffsetElements);
+  const std::uint32_t upperWord =
+      loadL1CachedWord(threadBase + kHalfWorkingSetElements + kPairOffsetElements);
+  checksum = xorThreeWords(checksum, lowerWord, upperWord);
   if constexpr (Remaining > 1)
-    loadXorPass<Pair + 1, Remaining - 1>(checksum, B);
+    runLoadXorPass<Pair + 1, Remaining - 1>(checksum, threadBase);
 }
 
-// L1 v2의 핵심 kernel.
+// Core L1 v2 kernel.
 //
-// - grid: SM당 block 하나, block: 512 threads (= 16 warps)
-// - data: 128 KiB working set. 각 block은 같은 data를 읽으므로 warm-up 뒤 L1 hit를
-//   반복적으로 발생시킨다.
-// - rounds=1(r1)이면 pass 1개, rounds=2(r2)이면 pass 2개를 실행한다.
-//   따라서 r2-r1의 active body 증분은 thread당 iteration마다 LDG 64개와 LOP3 32개다.
+// - Grid: one block per SM. Block: 512 threads (16 warps).
+// - Data: a 128 KiB working set. Every block reads the same allocation, so
+//   each SM repeatedly hits its own L1 after warm-up.
+// - rounds=1 (r1) executes one pass; rounds=2 (r2) executes two passes.
+//   Therefore r2-r1 adds exactly 64 LDG and 32 LOP3 per thread per iteration.
 //
-// pass loop는 항상 kMaxRounds번의 uniform branch를 실행한다. xor-only control
-// kernel도 동일한 branch 구조를 가지므로, 두 slope를 빼 LDG를 분리할 때 branch
-// 관련 에너지는 상쇄된다.
+// The pass loop always evaluates kMaxRounds uniform branches. The xor-only
+// control kernel has the same branch structure, so subtracting its slope
+// removes the branch/control contribution during LDG attribution.
 __global__ void l1LoadXorKernel(std::uint32_t* __restrict__ checksums,
                                 const float* __restrict__ data, unsigned int iterations,
-                                int zero, int rounds) {
-  // 같은 warp의 lane은 연속된 word를 읽어 coalesced 32-B sector 요청을 만든다.
-  const float* B0 = data + threadIdx.x;
+                                int runtimeZero, int rounds) {
+  // Lanes in a warp start at consecutive words, producing coalesced sectors.
+  const float* threadBase = data + threadIdx.x;
   std::uint32_t checksum = 0;
 #pragma unroll 1
   for (unsigned int iteration = 0; iteration < iterations; ++iteration) {
-    // runtime 값 zero(항상 0)를 더해 주소가 컴파일 타임 상수가 되지 않게 만든다.
-    // 실제 주소/traffic은 변하지 않는다.
-    B0 += zero;
+    // A runtime value that is always zero prevents the address from becoming
+    // a compile-time constant without changing the address or traffic.
+    threadBase += runtimeZero;
 #pragma unroll 1
     for (int pass = 0; pass < kMaxRounds; ++pass) {
-      if (rounds > pass) loadXorPass<0, kPairsPerPass>(checksum, B0);
+      if (rounds > pass) runLoadXorPass<0, kPairsPerPass>(checksum, threadBase);
     }
   }
-  // 정상 입력에서는 false라 store traffic은 없다. 하지만 checksum이 observable이어서
-  // LDG와 LOP3 체인이 제거되지 않는다.
+  // This condition is false in normal operation, so no store traffic is
+  // expected. It still makes checksum observable and preserves the LDG/LOP3 chain.
   if (checksum == 0xffffffffu)
     checksums[blockIdx.x * blockDim.x + threadIdx.x] = checksum;
 }
@@ -77,7 +83,9 @@ __global__ void l1LoadXorKernel(std::uint32_t* __restrict__ checksums,
 void launch(std::uint32_t* checksums, const float* data, int blocks,
             unsigned int iterations, int rounds, cudaStream_t stream) {
   if (rounds < 1 || rounds > kMaxRounds) fail("invalid round count");
-  l1LoadXorKernel<<<blocks, kThreads, 0, stream>>>(checksums, data, iterations, 0, rounds);
+  constexpr int kRuntimeZero = 0;
+  l1LoadXorKernel<<<blocks, kThreads, 0, stream>>>(
+      checksums, data, iterations, kRuntimeZero, rounds);
   CUDA_CHECK(cudaGetLastError());
 }
 
@@ -91,7 +99,7 @@ void run(const Options& options) {
   std::uint32_t* checksums = nullptr;
   CUDA_CHECK(cudaMalloc(&data, kWorkingSetBytes));
   CUDA_CHECK(cudaMalloc(&checksums, static_cast<size_t>(blocks) * kThreads * sizeof(std::uint32_t)));
-  initBits<<<52, 256>>>(data, kElementsPerSm, inputMode(options.input));
+  initBits<<<kInitBlocks, 256>>>(data, kElementsPerSm, inputMode(options.input));
   CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 

@@ -307,8 +307,8 @@ extract_one() {
         opcode=words[1]
         sub(/\..*$/, "", opcode)
         if (opcode == "" || opcode == "-") next
-        # 0회 실행된 BRA/BPT/NOP도 SASS에는 존재할 수 있다. 이 표는 opcode
-        # 합집합 자체가 검증 대상이므로, zero-count line도 보존한다.
+        # BRA/BPT/NOP can exist in SASS even when never executed. Preserve
+        # zero-count rows because the opcode union itself is a verification target.
         seen[opcode] = 1
         warp[opcode] += value[4]+0
         thread[opcode] += value[5]+0
@@ -361,9 +361,9 @@ for report in "${reports[@]}"; do
   fi
 done
 
-# 모든 report에서 단 한 번이라도 executed 된 opcode의 합집합을 기본 표로 쓴다.
-# 즉 LDG/LOP3뿐 아니라 branch, control, conversion, special-register 등도
-# 0을 포함해 각 조건 열에 모두 표시한다.
+# Use the union of every opcode executed in at least one report as the default
+# table. This includes branch, control, conversion, and special-register
+# opcodes in addition to LDG/LOP3, with zeroes retained in every condition.
 raw="${OUT_DIR}/executed_instruction_mix_source_all_comparison.csv"
 main="${OUT_DIR}/executed_instruction_mix_comparison.csv"
 thread="${OUT_DIR}/executed_instruction_mix_thread_comparison.csv"

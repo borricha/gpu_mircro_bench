@@ -15,6 +15,15 @@
 #include <sstream>
 #include <vector>
 
+// Reuse the exact device kernels from the two experiment sources. The guards
+// omit their standalone timing harnesses and mains in this translation unit.
+#define HBM_LOAD_XOR_DEVICE_ONLY
+#include "load_xor.cu"
+#undef HBM_LOAD_XOR_DEVICE_ONLY
+#define HBM_XOR_ONLY_DEVICE_ONLY
+#include "xor_only.cu"
+#undef HBM_XOR_ONLY_DEVICE_ONLY
+
 namespace {
 using namespace hbmv2;
 
@@ -310,7 +319,7 @@ void runPowerTrial(const PowerOptions& options) {
       : 0.0;
   // The fixed LOP3 prologue in xor-only is deliberately excluded: this is the
   // r1/r2-varying instruction count used for the regression slope.
-  const double lop3PerLdg = options.kind == "load-xor" ? 0.5 : 2.0;
+  const double lop3PerLdg = 0.5;
   const double variableLop3 =
       static_cast<double>(options.activeLoads) * lop3PerLdg * workGroups *
       kExecutedSassPerPtxSlot;

@@ -21,25 +21,29 @@
 
 namespace l2v2 {
 
-// v1과 같은 launch geometry: 200,000 CTAs × 1024 threads.  한 kernel 자체가
-// 충분히 길고 많은 CTA를 공급하므로, 여기서는 blocks/SM을 인위적으로 제한하지 않는다.
+// Preserve the v1 launch geometry: 200,000 CTAs x 1024 threads. One kernel
+// launch already supplies enough CTAs to hide L2 latency, so this benchmark
+// does not artificially constrain blocks per SM.
 constexpr int kThreads = 1024;
 constexpr int kLaunchBlocks = 200000;
 constexpr int kLoadsPerPass = 64;
+constexpr int kLoadPairsPerPass = kLoadsPerPass / 2;
 constexpr int kMaxRounds = 2;
+constexpr int kInitBlocks = 52;
+constexpr int kWarmupLaunches = 15;
 
-// gpu_cache_l2.cu(v1)와 동일한 storage/map:
-// N=128, BLOCKSIZE=1024, blockRun=33 => 33 × 512 KiB = 16,896 KiB.
-// 이는 A100 40 MiB L2 안에 있지만 단일 SM의 L1/TEX보다 훨씬 크다.
+// Preserve the v1 storage and CTA-to-region mapping:
+// N=128, block size=1024, region count=33 => 33 x 512 KiB = 16,896 KiB.
+// This fits in an A100-40's L2 but is far larger than one SM's L1/TEX cache.
 constexpr int kBlockRun = 33;
 constexpr int kBlockSize = 1024;
 constexpr int kN = 128;
 constexpr size_t kDataBytes =
     static_cast<size_t>(kBlockRun) * kBlockSize * kN * sizeof(float);
 constexpr size_t kDataElements = kDataBytes / sizeof(float);
-// v1의 inner-loop i가 한 번 증가할 때의 FP32 element stride.
-// CTA 하나가 담당하는 512 KiB region 내부의 pair stride. 64 pair의 두 4 B
-// load가 512 KiB 전체를 cover하며 모든 offset이 compile-time immediate다.
+// FP32 element stride between consecutive v1 inner-loop indices. Within one
+// 512 KiB region, 64 pairs of 4 B loads cover the full region; every offset is
+// a compile-time immediate in the generated SASS.
 constexpr int kPairStride = kThreads * 2;
 constexpr int kElementsPerRegion = kN * kBlockSize;
 static_assert(kElementsPerRegion * sizeof(float) == 512 * 1024,
@@ -51,8 +55,8 @@ static_assert(kDataBytes == 16896ull * 1024,
 struct Options {
   int device = 0;
   int activeLoads = kLoadsPerPass;
-  // v1은 200,000 CTA launch 하나가 약 20 ms이고 이미 L2를 포화시킨다.
-  // L1 v2처럼 kernel 내부 iteration을 길게 둘 필요가 없다.
+  // One v1-style 200,000-CTA launch is already about 20 ms and saturates L2.
+  // Unlike L1 v2, this benchmark does not need an in-kernel iteration loop.
   unsigned int iterations = 1;
   std::string input = "random";
   std::string launchMode = "single";

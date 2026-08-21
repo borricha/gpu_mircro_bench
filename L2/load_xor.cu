@@ -1,5 +1,5 @@
-// L2 v2 differential kernel: v1의 일반 global-load mapping 위에서,
-// 추가 pass마다 LDG 64개 + LOP3 64개만 늘린다.
+// L2 v2 differential kernel: preserve the v1 ordinary-global-load mapping
+// and add exactly 64 LDG plus 32 LOP3 per extra pass.
 #include "common.cuh"
 
 #include <iomanip>
@@ -8,62 +8,74 @@ namespace {
 
 using namespace l2v2;
 
-// v1 loadOnlyKernel과 동일하게 평범한 global load를 쓴다. 즉 .cg/__ldcg로
-// L1 allocation을 금지하지 않는다.  v1에서 약 5 TB/s가 나오던 경로를 보존한다.
-__device__ __forceinline__ std::uint32_t loadGlobal(const float* address) {
+// Keep the v1 ordinary global-load path: do not use .cg or __ldcg to bypass
+// L1 allocation. This preserves the path that reached about 5 TB/s in v1.
+__device__ __forceinline__ std::uint32_t loadGlobalWord(const float* address) {
   return __float_as_uint(*address);
 }
 
-// i/offset을 template 값으로 둬서 모든 load address를 compile-time에 고정한다.
-// r1/r2 모두 동일한 base-address prologue를 쓰며, r2에는 이 template body의 뒤
-// 32 pair만 추가된다. 따라서 active-load 수를 바꿔도 dynamic IMAD는 늘지 않는다.
-template <int Pair, int Remaining>
-__device__ __forceinline__ void staticLoadXorPairs(
-    std::uint32_t& checksum, const float* pairBase) {
-  constexpr size_t kOffset = static_cast<size_t>(Pair) * kPairStride;
-  checksum ^= loadGlobal(pairBase + kOffset);
-  checksum ^= loadGlobal(pairBase + kOffset + kBlockSize);
-  if constexpr (Remaining > 1)
-    staticLoadXorPairs<Pair + 1, Remaining - 1>(checksum, pairBase);
+// Keep the consumer pattern identical to L1: combine two loaded FP32 words
+// with the running checksum in one three-input LOP3.
+__device__ __forceinline__ std::uint32_t xorThreeWords(
+    std::uint32_t checksum, std::uint32_t first, std::uint32_t second) {
+  std::uint32_t result;
+  asm volatile("lop3.b32 %0, %1, %2, %3, 0x96;"
+               : "=r"(result) : "r"(checksum), "r"(first), "r"(second));
+  return result;
 }
 
-// L2 v2의 핵심 kernel.
-//
-// - data: v1과 동일한 16,896 KiB FP32. A100 40 MiB L2 안에 들어간다.
-// - grid/block: v1과 동일한 200,000 CTA × 1024 threads. scheduler가 많은 CTA를
-//   지속 공급하여 L2 latency를 숨긴다.
-// - blockIdx.x % 33 region과 i별 stride도 v1과 동일하다. 따라서 r2(128 loads)는
-//   기존 loadOnlyKernel의 128 load address sequence와 같다.
-// - r1/r2 차이는 active pass 수뿐이다. r2-r1의 active body 증분은 thread당
-//   iteration마다 일반 LDG 64개 + LOP3 64개다.
-template <int ActiveLoads, int BlockSize>
-__global__ void l2LoadXorKernel(const float* __restrict__ data,
-                                int blockRun) {
-  std::uint32_t checksum = 0;
-  // v1의 region mapping은 유지하되, i별 offset은 위 template에 static으로 넣는다.
-  // v1과 같은 33 × 512 KiB = 16,896 KiB working set. CTA는 512 KiB region 하나를
-  // 맡고, compile-time offset 64쌍을 순회한다. region은 L1보다 커서 반복 CTA가
-  // 만든 data는 L2에 머무르지만 r1/r2 address arithmetic은 동일하게 유지된다.
-  const size_t blockOffset = static_cast<size_t>(blockIdx.x % blockRun) *
-      kElementsPerRegion + threadIdx.x;
-  const float* base = data + blockOffset;
-  staticLoadXorPairs<0, kLoadsPerPass / 2>(checksum, base);
-  if constexpr (ActiveLoads == 2 * kLoadsPerPass)
-    staticLoadXorPairs<kLoadsPerPass / 2, kLoadsPerPass / 2>(checksum, base);
+// Template parameters make every load offset a compile-time constant. r1 and
+// r2 share the same base-address prologue; r2 only appends 32 pairs from this
+// static body, so changing active-load count does not add dynamic IMAD work.
+template <int Pair, int Remaining>
+__device__ __forceinline__ void runStaticLoadXorPairs(
+    std::uint32_t& checksum, const float* threadRegionBase) {
+  constexpr size_t kPairOffsetElements = static_cast<size_t>(Pair) * kPairStride;
+  const std::uint32_t first =
+      loadGlobalWord(threadRegionBase + kPairOffsetElements);
+  const std::uint32_t second =
+      loadGlobalWord(threadRegionBase + kPairOffsetElements + kBlockSize);
+  checksum = xorThreeWords(checksum, first, second);
+  if constexpr (Remaining > 1)
+    runStaticLoadXorPairs<Pair + 1, Remaining - 1>(checksum, threadRegionBase);
+}
 
-  // v1과 동일하게 normal-path store는 없고, trap 의존성이 모든 load를 live로 만든다.
+// Core L2 v2 kernel.
+//
+// - Data: the v1 16,896 KiB FP32 working set, which fits in A100-40 L2.
+// - Grid/block: the v1 200,000 CTA x 1024-thread geometry supplies enough
+//   concurrent work to hide L2 latency.
+// - The blockIdx.x % 33 region mapping and per-pair stride match v1. Thus the
+//   r2 128-load address sequence is the original loadOnlyKernel sequence.
+// - r1/r2 differ only in active passes. r2-r1 adds 64 ordinary LDG and 32
+//   LOP3 per thread per kernel launch, matching the L1/HBM differential body.
+template <int ActiveLoads>
+__global__ void l2LoadXorKernel(const float* __restrict__ data,
+                                int regionCount) {
+  std::uint32_t checksum = 0;
+  // Preserve the v1 CTA-to-region mapping while embedding pair offsets in the
+  // template body. Each CTA owns one 512 KiB region; 33 regions form the
+  // 16,896 KiB working set. The set is L2-resident but exceeds one SM's L1.
+  const size_t regionOffset = static_cast<size_t>(blockIdx.x % regionCount) *
+      kElementsPerRegion + threadIdx.x;
+  const float* threadRegionBase = data + regionOffset;
+  runStaticLoadXorPairs<0, kLoadPairsPerPass>(checksum, threadRegionBase);
+  if constexpr (ActiveLoads == 2 * kLoadsPerPass)
+    runStaticLoadXorPairs<kLoadPairsPerPass, kLoadPairsPerPass>(
+        checksum, threadRegionBase);
+
+  // No normal-path store is issued. The trap dependency keeps every load live.
   if (checksum == 0xffffffffu)
     asm volatile("trap;");
 }
 
-void launch(const float* data, int blocks, unsigned int /* iterations */, int rounds,
-            cudaStream_t stream) {
+void launch(const float* data, int blocks, int rounds, cudaStream_t stream) {
   if (rounds < 1 || rounds > kMaxRounds) fail("invalid round count");
   if (rounds == 1)
-    l2LoadXorKernel<kLoadsPerPass, kBlockSize><<<blocks, kThreads, 0, stream>>>(
+    l2LoadXorKernel<kLoadsPerPass><<<blocks, kThreads, 0, stream>>>(
         data, kBlockRun);
   else
-    l2LoadXorKernel<2 * kLoadsPerPass, kBlockSize><<<blocks, kThreads, 0, stream>>>(
+    l2LoadXorKernel<2 * kLoadsPerPass><<<blocks, kThreads, 0, stream>>>(
         data, kBlockRun);
   CUDA_CHECK(cudaGetLastError());
 }
@@ -78,22 +90,22 @@ void run(const Options& options) {
   const int rounds = options.activeLoads / kLoadsPerPass;
   float* data = nullptr;
   CUDA_CHECK(cudaMalloc(&data, kDataBytes));
-  // v1 initKernel과 같은 52 × 256 launch geometry를 사용한다.
-  initBits<<<52, 256>>>(data, kDataElements, inputMode(options.input));
+  // Use the same 52 x 256 initialization geometry as v1.
+  initBits<<<kInitBlocks, 256>>>(data, kDataElements, inputMode(options.input));
   CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
-  // v1은 같은 process에서 11회 실행한 뒤 minimum을 보고한다. 따라서 첫 실행이
-  // 16,896 KiB working set을 L2로 채운 뒤의 warm-cache 상태를 측정한다. v2도
-  // 측정 event 바깥에서 동일 kernel을 15번 실행하여 이 조건을 맞춘다.
-  for (int warmup = 0; warmup < 15; ++warmup)
-    launch(data, blocks, options.iterations, rounds, 0);
+  // v1 reports the minimum of repeated in-process launches, therefore it
+  // measures after the first launch has filled the 16,896 KiB working set in
+  // L2. Run the same kernel outside the timing event to establish that state.
+  for (int warmup = 0; warmup < kWarmupLaunches; ++warmup)
+    launch(data, blocks, rounds, 0);
   CUDA_CHECK(cudaDeviceSynchronize());
 
   const float milliseconds = timedLaunchSequence(
       options,
       [&](cudaStream_t stream) {
-        launch(data, blocks, options.iterations, rounds, stream);
+        launch(data, blocks, rounds, stream);
       },
       "l2v2_load_xor_graph_replay");
   const double issuedLoads = static_cast<double>(options.activeLoads) *
@@ -125,7 +137,7 @@ int main(int argc, char** argv) {
   } catch (const std::exception& error) {
     if (std::string(error.what()) == "help") {
       l2v2::printCommonUsage(argv[0],
-          "v1-style L2 path: ordinary global LDG; each pass adds 64 LDG + 64 LOP3.");
+          "v1-style L2 path: ordinary global LDG; each pass adds 64 LDG + 32 LOP3.");
       return EXIT_SUCCESS;
     }
     std::cerr << "Error: " << error.what() << '\n';
