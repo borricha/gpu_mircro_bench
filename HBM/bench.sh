@@ -7,6 +7,7 @@ CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.1}"
 NVCC_BIN="${NVCC:-${CUDA_HOME}/bin/nvcc}"
 NCU_BIN="${NCU:-${CUDA_HOME}/bin/ncu}"
 NSYS_BIN="${NSYS:-${CUDA_HOME}/bin/nsys}"
+CUDA_ARCH="${CUDA_ARCH:-sm_80}"
 
 LOAD_BIN="${BUILD_DIR}/load_xor"
 XOR_BIN="${BUILD_DIR}/xor_only"
@@ -24,7 +25,8 @@ Usage:
   ./bench.sh instruction-mix [--ncu-dir DIR] [--out-dir DIR]
 
 Kernel options include:
-  --device N --mib N --blocks-per-sm N --active-loads <64|128>
+  --device N --mib N --blocks-per-sm N|--grid-blocks N --threads 128|256
+  --active-loads <64|128>
   --input <zero|random|one-point-one> --trials N
 
 active-loads=64 is r1 and 128 is r2. `load-xor` is the final LDG-dominant
@@ -36,16 +38,16 @@ EOF
 build() {
   mkdir -p "${BUILD_DIR}"
   [[ -x "${NVCC_BIN}" ]] || { echo "nvcc not found: ${NVCC_BIN}" >&2; exit 1; }
-  "${NVCC_BIN}" -O3 -std=c++17 -arch=sm_80 -lineinfo \
+  "${NVCC_BIN}" -O3 -std=c++17 -arch="${CUDA_ARCH}" -lineinfo \
     "${ROOT_DIR}/load_xor.cu" -o "${LOAD_BIN}"
-  "${NVCC_BIN}" -O3 -std=c++17 -arch=sm_80 -lineinfo \
+  "${NVCC_BIN}" -O3 -std=c++17 -arch="${CUDA_ARCH}" -lineinfo \
     "${ROOT_DIR}/xor_only.cu" -o "${XOR_BIN}"
 }
 
 build_power() {
   mkdir -p "${BUILD_DIR}"
   [[ -x "${NVCC_BIN}" ]] || { echo "nvcc not found: ${NVCC_BIN}" >&2; exit 1; }
-  "${NVCC_BIN}" -O3 -std=c++17 -arch=sm_80 -lineinfo \
+  "${NVCC_BIN}" -O3 -std=c++17 -arch="${CUDA_ARCH}" -lineinfo \
     "${ROOT_DIR}/power_driver.cu" -o "${POWER_BIN}" \
     -lnvidia-ml -Xcompiler -pthread
 }
@@ -179,6 +181,8 @@ SAMPLE_MS="${SAMPLE_MS:-10}"
 REPETITIONS="${REPETITIONS:-2}"
 MIB="${MIB:-1024}"
 BLOCKS_PER_SM="${BLOCKS_PER_SM:-8}"
+GRID_BLOCKS="${GRID_BLOCKS:-0}"
+THREADS="${THREADS:-256}"
 LOAD_KIND="${LOAD_KIND:-load-xor}"
 INNER_REPEATS="${INNER_REPEATS:-64}"
 LAUNCH_BATCH="${LAUNCH_BATCH:-8}"
@@ -189,7 +193,8 @@ OUT_DIR="${OUT_DIR:-${ROOT_DIR}/build/power/${RUN_TAG}}"
 usage() {
   cat <<'EOF'
 Usage: ./bench.sh differential [options]
-  --device N --p-const-w W --p-static-w W --mib N --blocks-per-sm N
+  --device N --p-const-w W --p-static-w W --mib N
+  --blocks-per-sm N|--grid-blocks N --threads 128|256
   --precondition-seconds S --measure-seconds S --cooldown-seconds S
   --sample-ms MS --repetitions N --inner-repeats N --launch-batch N
   --input random|zero|one-point-one --output-dir DIR
@@ -210,6 +215,8 @@ while (($#)); do
     --p-static-w) P_STATIC_W="$2"; shift 2 ;;
     --mib) MIB="$2"; shift 2 ;;
     --blocks-per-sm) BLOCKS_PER_SM="$2"; shift 2 ;;
+    --grid-blocks) GRID_BLOCKS="$2"; shift 2 ;;
+    --threads) THREADS="$2"; shift 2 ;;
     --load-kind) LOAD_KIND="$2"; shift 2 ;;
     --precondition-seconds) PRECONDITION_SECONDS="$2"; shift 2 ;;
     --measure-seconds) MEASURE_SECONDS="$2"; shift 2 ;;
@@ -242,7 +249,8 @@ calibrate_kind() {
   calibration_telemetry="${OUT_DIR}/telemetry/calibration_${kind}.csv"
   calibration_output="$("${RUNNER}" power \
     --device "${DEVICE}" --kind "${kind}" --active-loads 64 \
-    --mib "${MIB}" --blocks-per-sm "${BLOCKS_PER_SM}" --input "${INPUT}" \
+    --mib "${MIB}" --blocks-per-sm "${BLOCKS_PER_SM}" \
+    --grid-blocks "${GRID_BLOCKS}" --threads "${THREADS}" --input "${INPUT}" \
     --precondition-seconds 0 --measure-seconds 1 --sample-ms "${SAMPLE_MS}" \
     --inner-repeats "${INNER_REPEATS}" --launch-batch "${LAUNCH_BATCH}" \
     --p-constant-w "${P_CONST_W}" --p-static-w "${P_STATIC_W}" --repetition 1 \
@@ -265,7 +273,8 @@ run_condition() {
   echo "== ${kind} r$((active / 64)), repetition ${rep}/${REPETITIONS} =="
   "${RUNNER}" power \
     --device "${DEVICE}" --kind "${kind}" --active-loads "${active}" \
-    --mib "${MIB}" --blocks-per-sm "${BLOCKS_PER_SM}" --input "${INPUT}" \
+    --mib "${MIB}" --blocks-per-sm "${BLOCKS_PER_SM}" \
+    --grid-blocks "${GRID_BLOCKS}" --threads "${THREADS}" --input "${INPUT}" \
     --precondition-seconds "${PRECONDITION_SECONDS}" --measure-seconds "${MEASURE_SECONDS}" \
     --sample-ms "${SAMPLE_MS}" --inner-repeats "${inner_repeats}" \
     --launch-batch "${LAUNCH_BATCH}" --graph-nodes "${graph_nodes}" \
@@ -332,7 +341,10 @@ def main(raw_path, output_path, load_kind, count_scale):
             "lop3_count": mean([float(r["variable_lop3_warp_instructions"]) * count_scale for r in samples]),
             "ldg_rate": mean([float(r["variable_ldg_warp_instr_per_s"]) * count_scale for r in samples]),
             "lop3_rate": mean([float(r["variable_lop3_warp_instr_per_s"]) * count_scale for r in samples]),
-            "throttle": mean([float(r["throttle_any_pct"]) for r in samples]),
+            "throttle_any": mean([float(r["throttle_any_pct"]) for r in samples]),
+            "throttle_sw_power": mean([float(r["throttle_sw_power_pct"]) for r in samples]),
+            "throttle_hw_slowdown": mean([float(r["throttle_hw_slowdown_pct"]) for r in samples]),
+            "throttle_hw_thermal": mean([float(r["throttle_hw_thermal_pct"]) for r in samples]),
             "sm_clock": mean([float(r["sm_clock_avg_mhz"]) for r in samples]),
             "mem_clock": mean([float(r["mem_clock_avg_mhz"]) for r in samples]),
         }
@@ -387,7 +399,10 @@ def main(raw_path, output_path, load_kind, count_scale):
         prefix = f"{kind}_r{active // 64}"
         result.extend([
             (prefix + "_board_power", p["board_w"], "W", "mean across repetitions"),
-            (prefix + "_throttle", p["throttle"], "%", "NVML samples"),
+            (prefix + "_throttle_any", p["throttle_any"], "%", "NVML samples"),
+            (prefix + "_throttle_sw_power", p["throttle_sw_power"], "%", "NVML samples"),
+            (prefix + "_throttle_hw_slowdown", p["throttle_hw_slowdown"], "%", "NVML samples"),
+            (prefix + "_throttle_hw_thermal", p["throttle_hw_thermal"], "%", "NVML samples"),
             (prefix + "_sm_clock", p["sm_clock"], "MHz", "NVML samples"),
             (prefix + "_mem_clock", p["mem_clock"], "MHz", "NVML samples"),
         ])

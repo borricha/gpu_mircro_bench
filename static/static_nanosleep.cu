@@ -51,6 +51,9 @@ struct Options {
   unsigned int sleepNs = 1'000'000;
   int threads = 256;
   int blocksPerSm = 8;
+  // Exact grid override for matching a low-concurrency benchmark.  A grid of
+  // 57 CTAs on a 114-SM H100 can occupy at most half of the SMs at once.
+  int gridBlocks = 0;
   int repetition = 1;
   std::string idleTelemetryOutput;
   std::string telemetryOutput;
@@ -99,6 +102,7 @@ void usage(const char* program) {
       << "  --sleep-ns N                nanosleep request per loop iteration (default: 1000000)\n"
       << "  --threads N                 threads/block, multiple of 32 (default: 256)\n"
       << "  --blocks-per-sm N           blocks launched per SM (default: 8)\n"
+      << "  --grid-blocks N             exact CTA grid override (default: derived)\n"
       << "  --repetition N              CSV trial label (default: 1)\n"
       << "  --idle-telemetry-output F   auto P_const raw NVML samples CSV\n"
       << "  --telemetry-output F        nanosleep raw NVML samples CSV\n"
@@ -133,6 +137,8 @@ Options parseOptions(int argc, char** argv) {
       options.threads = static_cast<int>(parseInteger(value(), "threads"));
     else if (arg == "--blocks-per-sm")
       options.blocksPerSm = static_cast<int>(parseInteger(value(), "blocks-per-sm"));
+    else if (arg == "--grid-blocks")
+      options.gridBlocks = static_cast<int>(parseInteger(value(), "grid-blocks"));
     else if (arg == "--repetition")
       options.repetition = static_cast<int>(parseInteger(value(), "repetition"));
     else if (arg == "--idle-telemetry-output")
@@ -152,7 +158,7 @@ Options parseOptions(int argc, char** argv) {
       options.preconditionSeconds < 0.0 || options.measureSeconds <= 0.0 ||
       options.sampleMs == 0 || options.pConstantW < -1.0 || options.sleepNs == 0 ||
       options.threads < 32 || options.threads > 1024 || options.threads % 32 != 0 ||
-      options.blocksPerSm < 1 || options.repetition < 1)
+      options.blocksPerSm < 1 || options.gridBlocks < 0 || options.repetition < 1)
     fail("invalid option value");
   return options;
 }
@@ -284,7 +290,8 @@ void appendSummary(const Options& options, const cudaDeviceProp& prop,
   const double staticEnergyJ = staticPowerW * active.gpuSeconds;
   const char* header =
       "timestamp,device_index,gpu_name,repetition,sm_count,threads_per_block,"
-      "requested_blocks_per_sm,resident_blocks_per_sm,sleep_ns,iterations,"
+      "requested_blocks_per_sm,requested_grid_blocks,launched_blocks,resident_blocks_per_sm,"
+      "sleep_ns,iterations,"
       "p_constant_source,p_constant_w,idle_elapsed_s,idle_power_avg_w,"
       "nanosleep_kernel_active_s,nanosleep_wall_elapsed_s,nanosleep_power_avg_w,"
       "static_power_w,static_energy_j,util_avg_pct,sm_clock_avg_mhz,"
@@ -295,8 +302,9 @@ void appendSummary(const Options& options, const cudaDeviceProp& prop,
   std::ostringstream row;
   row << timestamp() << ',' << options.device << ',' << prop.name << ','
       << options.repetition << ',' << prop.multiProcessorCount << ','
-      << options.threads << ',' << options.blocksPerSm << ',' << residentBlocksPerSm
-      << ',' << options.sleepNs << ',' << iterations << ','
+      << options.threads << ',' << options.blocksPerSm << ',' << options.gridBlocks << ','
+      << (options.gridBlocks > 0 ? options.gridBlocks : prop.multiProcessorCount * options.blocksPerSm)
+      << ',' << residentBlocksPerSm << ',' << options.sleepNs << ',' << iterations << ','
       << (options.pConstantW >= 0.0 ? "provided" : "auto_cuda_idle") << ','
       << std::fixed << std::setprecision(6) << pConstantW << ','
       << idle.wallSeconds << ',' << idle.telemetry.time_weighted_avg_w << ','
@@ -379,7 +387,9 @@ int main(int argc, char** argv) {
       std::cerr << "Warning: requested " << options.blocksPerSm << " blocks/SM, but "
                 << "this launch can residently hold " << maxBlocksPerSm << " blocks/SM.\n";
     }
-    const int blocks = prop.multiProcessorCount * options.blocksPerSm;
+    const int blocks = options.gridBlocks > 0
+        ? options.gridBlocks
+        : prop.multiProcessorCount * options.blocksPerSm;
     const std::uint64_t iterations =
         iterationsFor(options.measureSeconds, options.sleepNs);
 

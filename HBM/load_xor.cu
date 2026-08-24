@@ -25,18 +25,18 @@ __device__ __forceinline__ std::uint32_t xorThreeWords(
 
 // This is the L2-style static offset body. The largest offset is below the
 // 128 KiB CTA region, so ptxas does not need a new large-plane base for R2.
-template <int Pair, int Remaining>
+template <int Pair, int Remaining, int Threads>
 __device__ __forceinline__ void runStaticLoadXorPairs(
     std::uint32_t& state, const std::uint32_t* regionBase) {
-  constexpr size_t offset = static_cast<size_t>(Pair) * kPairStrideWords;
+  constexpr size_t offset = static_cast<size_t>(Pair) * 2 * Threads;
   const auto first = loadHbmWord(regionBase + offset);
-  const auto second = loadHbmWord(regionBase + offset + kThreads);
+  const auto second = loadHbmWord(regionBase + offset + Threads);
   state = xorThreeWords(state, first, second);
   if constexpr (Remaining > 1)
-    runStaticLoadXorPairs<Pair + 1, Remaining - 1>(state, regionBase);
+    runStaticLoadXorPairs<Pair + 1, Remaining - 1, Threads>(state, regionBase);
 }
 
-template <int ActiveLoads>
+template <int ActiveLoads, int Threads>
 __global__ void hbmLoadDominantKernel(const packed_fp32* __restrict__ data,
                                       size_t groups, int innerRepeats) {
   const auto* words = reinterpret_cast<const std::uint32_t*>(data);
@@ -47,23 +47,35 @@ __global__ void hbmLoadDominantKernel(const packed_fp32* __restrict__ data,
 #pragma unroll 1
     for (size_t group = 0; group < groups; ++group) {
       const size_t region = group * gridDim.x + blockIdx.x;
-      const auto* regionBase = words + region * kWordsPerRegion + threadIdx.x;
-      runStaticLoadXorPairs<0, kLoadPairsPerRound>(state, regionBase);
+      const auto* regionBase = words + region * wordsPerRegion(Threads) + threadIdx.x;
+      runStaticLoadXorPairs<0, kLoadPairsPerRound, Threads>(state, regionBase);
       if constexpr (ActiveLoads == 2 * kScalarLoadsPerRound)
-        runStaticLoadXorPairs<kLoadPairsPerRound, kLoadPairsPerRound>(state, regionBase);
+        runStaticLoadXorPairs<kLoadPairsPerRound, kLoadPairsPerRound, Threads>(state, regionBase);
     }
   }
   if (state == 0xffffffffu) asm volatile("trap;");
 }
 
 inline void launchLoadDominant(const packed_fp32* data, size_t groups, int blocks,
-                               int rounds, int innerRepeats, cudaStream_t stream) {
-  if (rounds == 1)
-    hbmLoadDominantKernel<kScalarLoadsPerRound><<<blocks, kThreads, 0, stream>>>(
-        data, groups, innerRepeats);
-  else
-    hbmLoadDominantKernel<2 * kScalarLoadsPerRound><<<blocks, kThreads, 0, stream>>>(
-        data, groups, innerRepeats);
+                               int threads, int rounds, int innerRepeats,
+                               cudaStream_t stream) {
+  if (threads == 128) {
+    if (rounds == 1)
+      hbmLoadDominantKernel<kScalarLoadsPerRound, 128><<<blocks, 128, 0, stream>>>(
+          data, groups, innerRepeats);
+    else
+      hbmLoadDominantKernel<2 * kScalarLoadsPerRound, 128><<<blocks, 128, 0, stream>>>(
+          data, groups, innerRepeats);
+  } else if (threads == 256) {
+    if (rounds == 1)
+      hbmLoadDominantKernel<kScalarLoadsPerRound, 256><<<blocks, 256, 0, stream>>>(
+          data, groups, innerRepeats);
+    else
+      hbmLoadDominantKernel<2 * kScalarLoadsPerRound, 256><<<blocks, 256, 0, stream>>>(
+          data, groups, innerRepeats);
+  } else {
+    fail("load-xor supports --threads 128 or 256");
+  }
   CUDA_CHECK(cudaGetLastError());
 }
 
@@ -80,21 +92,19 @@ void run(const Options& options) {
   const size_t bytes = options.mib * 1024ull * 1024ull;
   if (bytes <= static_cast<size_t>(prop.l2CacheSize)) fail("--mib must exceed L2 size");
   const size_t count = bytes / sizeof(packed_fp32);
-  const int blocks = prop.multiProcessorCount * options.blocksPerSm;
-  if (blocks != kDominantFixedGridBlocks)
-    fail("load-xor requires 108 SM x 8 blocks/SM (864 blocks) on this A100");
-  const size_t groupBytes = static_cast<size_t>(blocks) * kWordsPerRegion * sizeof(std::uint32_t);
+  const int blocks = gridBlocksFor(options, prop);
+  const size_t groupBytes = static_cast<size_t>(blocks) * wordsPerRegion(options.threads) * sizeof(std::uint32_t);
   const size_t groups = bytes / groupBytes;
   if (groups == 0) fail("buffer too small for HBM stream geometry");
   packed_fp32* data = nullptr;
   CUDA_CHECK(cudaMalloc(&data, bytes));
-  const int initBlocks = std::min<int>(65535, (count + kThreads - 1) / kThreads);
-  initBits<<<initBlocks, kThreads>>>(data, count, inputMode(options.input));
+  const int initBlocks = std::min<int>(65535, (count + kDefaultThreads - 1) / kDefaultThreads);
+  initBits<<<initBlocks, kDefaultThreads>>>(data, count, inputMode(options.input));
   CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
   const int rounds = options.activeLoads / kScalarLoadsPerRound;
   // Establish page mappings and the steady-state stream before timing.
-  launchLoadDominant(data, groups, blocks, rounds, 1, nullptr);
+  launchLoadDominant(data, groups, blocks, options.threads, rounds, 1, nullptr);
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<double> milliseconds;
@@ -104,7 +114,7 @@ void run(const Options& options) {
   CUDA_CHECK(cudaEventCreate(&stop));
   for (int trial = 0; trial < options.trials; ++trial) {
     CUDA_CHECK(cudaEventRecord(start));
-    launchLoadDominant(data, groups, blocks, rounds, 1, nullptr);
+    launchLoadDominant(data, groups, blocks, options.threads, rounds, 1, nullptr);
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
     float ms = 0.0f;
@@ -116,10 +126,11 @@ void run(const Options& options) {
   const double best = *std::min_element(milliseconds.begin(), milliseconds.end());
   // A scalar load returns 4 B per lane, i.e. 128 B per warp LDG.E.32.
   const double logicalBytes = static_cast<double>(options.activeLoads) *
-      sizeof(std::uint32_t) * static_cast<double>(groups) * blocks * kThreads;
+      sizeof(std::uint32_t) * static_cast<double>(groups) * blocks * options.threads;
   std::cout << std::fixed << std::setprecision(3)
             << "kernel=hbmLoadDominantKernel rounds=" << rounds
-            << " groups=" << groups << " blocks=" << blocks << " kernel_ms=" << best
+            << " groups=" << groups << " blocks=" << blocks << " threads=" << options.threads
+            << " kernel_ms=" << best
             << " logical_bytes=" << std::setprecision(0) << logicalBytes
             << " logical_bw_gbs=" << std::setprecision(3)
             << logicalBytes / (best / 1000.0) / 1e9 << '\n';

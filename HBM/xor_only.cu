@@ -42,12 +42,12 @@ __global__ void hbmXorOnlyKernel(size_t groups, int innerRepeats) {
 }
 
 inline void launchXorOnly(size_t groups, int blocks, int rounds,
-                          int innerRepeats, cudaStream_t stream) {
+                          int threads, int innerRepeats, cudaStream_t stream) {
   if (rounds == 1)
-    hbmXorOnlyKernel<kScalarLoadsPerRound><<<blocks, kThreads, 0, stream>>>(
+    hbmXorOnlyKernel<kScalarLoadsPerRound><<<blocks, threads, 0, stream>>>(
         groups, innerRepeats);
   else
-    hbmXorOnlyKernel<2 * kScalarLoadsPerRound><<<blocks, kThreads, 0, stream>>>(
+    hbmXorOnlyKernel<2 * kScalarLoadsPerRound><<<blocks, threads, 0, stream>>>(
         groups, innerRepeats);
   CUDA_CHECK(cudaGetLastError());
 }
@@ -70,8 +70,8 @@ void run(const Options& options) {
   CUDA_CHECK(cudaGetDeviceProperties(&prop, options.device));
   const size_t bytes = options.mib * 1024ull * 1024ull;
   if (bytes <= static_cast<size_t>(prop.l2CacheSize)) fail("--mib must exceed L2 size");
-  const int blocks = prop.multiProcessorCount * options.blocksPerSm;
-  const size_t groupBytes = static_cast<size_t>(blocks) * kWordsPerRegion * sizeof(std::uint32_t);
+  const int blocks = gridBlocksFor(options, prop);
+  const size_t groupBytes = static_cast<size_t>(blocks) * wordsPerRegion(options.threads) * sizeof(std::uint32_t);
   const size_t groups = bytes / groupBytes;
   if (groups == 0) fail("buffer too small for HBM stream geometry");
   const int rounds = options.activeLoads / kScalarLoadsPerRound;
@@ -80,7 +80,7 @@ void run(const Options& options) {
   // deliberately untouched by the timed XOR-only kernel.
   packed_fp32* footprint = nullptr;
   CUDA_CHECK(cudaMalloc(&footprint, bytes));
-  launchXorOnly(groups, blocks, rounds, 1, nullptr);
+  launchXorOnly(groups, blocks, rounds, options.threads, 1, nullptr);
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<double> milliseconds;
@@ -90,7 +90,7 @@ void run(const Options& options) {
   CUDA_CHECK(cudaEventCreate(&stop));
   for (int trial = 0; trial < options.trials; ++trial) {
     CUDA_CHECK(cudaEventRecord(start));
-    launchXorOnly(groups, blocks, rounds, 1, nullptr);
+    launchXorOnly(groups, blocks, rounds, options.threads, 1, nullptr);
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
     float ms = 0.0f;
@@ -100,10 +100,11 @@ void run(const Options& options) {
   CUDA_CHECK(cudaEventDestroy(start)); CUDA_CHECK(cudaEventDestroy(stop));
   const double best = *std::min_element(milliseconds.begin(), milliseconds.end());
   const double logicalLop3 = static_cast<double>(options.activeLoads) / 2.0 *
-      static_cast<double>(groups) * blocks * kThreads;
+      static_cast<double>(groups) * blocks * options.threads;
   std::cout << std::fixed << std::setprecision(3)
             << "kernel=hbmXorOnlyKernel rounds=" << rounds
-            << " groups=" << groups << " blocks=" << blocks << " kernel_ms=" << best
+            << " groups=" << groups << " blocks=" << blocks << " threads=" << options.threads
+            << " kernel_ms=" << best
             << " logical_lop3=" << std::setprecision(0) << logicalLop3 << '\n';
   CUDA_CHECK(cudaFree(footprint));
 }

@@ -23,7 +23,7 @@ namespace hbmv2 {
 using packed_fp32 = uint4;
 
 // A100-40 HBM launch configuration.
-constexpr int kThreads = 256;
+constexpr int kDefaultThreads = 256;
 constexpr int kDefaultBlocksPerSm = 8;
 constexpr int kDominantFixedGridBlocks = 864;  // 108 SMs x 8 CTAs/SM.
 
@@ -35,14 +35,18 @@ constexpr int kScalarLoadsPerGroup = kScalarLoadsPerRound * kMaxRounds;
 constexpr int kLoadPairsPerRound = kScalarLoadsPerRound / 2;
 // One CTA owns a 128 KiB region: R1 reads its first half and R2 reads both
 // halves. This keeps every static load offset small while groups sweep 1 GiB.
-constexpr size_t kWordsPerRegion =
-    static_cast<size_t>(kScalarLoadsPerGroup) * kThreads;
-constexpr size_t kPairStrideWords = static_cast<size_t>(2) * kThreads;
+__host__ __device__ constexpr size_t wordsPerRegion(int threads) {
+  return static_cast<size_t>(kScalarLoadsPerGroup) * threads;
+}
 
 struct Options {
   int device = 0;
   size_t mib = 1024;
   int blocksPerSm = kDefaultBlocksPerSm;
+  // When nonzero, this is an exact grid-size override.  It bounds how many
+  // SMs can simultaneously host a CTA, unlike blocks-per-sm.
+  int gridBlocks = 0;
+  int threads = kDefaultThreads;
   int activeLoads = kScalarLoadsPerRound;
   std::string input = "random";
   int trials = 1;
@@ -77,6 +81,8 @@ inline Options parseOptions(int argc, char** argv) {
     if (arg == "--device") options.device = static_cast<int>(parseInteger(value(), "device"));
     else if (arg == "--mib") options.mib = static_cast<size_t>(parseInteger(value(), "mib"));
     else if (arg == "--blocks-per-sm") options.blocksPerSm = static_cast<int>(parseInteger(value(), "blocks-per-sm"));
+    else if (arg == "--grid-blocks") options.gridBlocks = static_cast<int>(parseInteger(value(), "grid-blocks"));
+    else if (arg == "--threads") options.threads = static_cast<int>(parseInteger(value(), "threads"));
     else if (arg == "--active-loads") options.activeLoads = static_cast<int>(parseInteger(value(), "active-loads"));
     else if (arg == "--rounds") options.activeLoads = static_cast<int>(parseInteger(value(), "rounds")) * kScalarLoadsPerRound;
     else if (arg == "--trials") options.trials = static_cast<int>(parseInteger(value(), "trials"));
@@ -85,10 +91,17 @@ inline Options parseOptions(int argc, char** argv) {
     else fail("unknown option: " + arg);
   }
   if (options.device < 0 || options.mib == 0 || options.blocksPerSm < 1 ||
+      options.gridBlocks < 0 || (options.threads != 128 && options.threads != 256) ||
       options.trials < 1 || (options.activeLoads != 64 && options.activeLoads != 128))
     fail("invalid option value");
   inputMode(options.input);
   return options;
+}
+
+inline int gridBlocksFor(const Options& options, const cudaDeviceProp& prop) {
+  return options.gridBlocks > 0
+      ? options.gridBlocks
+      : prop.multiProcessorCount * options.blocksPerSm;
 }
 
 __device__ __forceinline__ std::uint32_t mixBits(std::uint32_t x) {
@@ -114,7 +127,8 @@ __global__ void initBits(packed_fp32* data, size_t count, int mode) {
 
 inline void printUsage(const char* program, const char* description) {
   std::cout << "Usage: " << program
-            << " [--device N] [--mib N] [--blocks-per-sm N]"
+            << " [--device N] [--mib N] [--blocks-per-sm N | --grid-blocks N]"
+            << " [--threads 128|256]"
             << " [--active-loads 64|128 | --rounds 1|2]"
             << " [--trials N] [--input random|zero|one-point-one]\n"
             << description << '\n';

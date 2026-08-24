@@ -107,6 +107,26 @@ CUDA_VISIBLE_DEVICES=0 ./bench.sh differential \
 The summary reports both `P_board - P_const` and
 `P_board - P_const - P_static` LDG energy per logical bit.
 
+### H100 low-concurrency power run
+
+`--grid-blocks` takes precedence over `--blocks-per-sm`.  It is intended for
+throttle avoidance: it limits the number of simultaneously resident CTAs,
+whereas merely reducing the CTA size can still spread work across every SM.
+The 114-SM H100 PCIe starting point is 57 CTAs x 128 threads = 228 warps.
+
+```bash
+CUDA_ARCH=sm_90 DEVICE=0 NVML_DEVICE=0 \
+  ./run_h100_low_concurrency.sh
+```
+
+The runner remeasures `P_const`, a matching 57-CTA/128-thread `P_static`,
+and NCU r1/r2 counts before running both zero and random power matrices.  It
+fails if any r1/r2 load or control row has a nonzero `throttle_any`,
+`throttle_sw_power`, `throttle_hw_slowdown`, or `throttle_hw_thermal` sample.
+Set `GRID_BLOCKS=66` for a 132-SM H100 SXM starting point.  The source has
+specialized 128- and 256-thread kernels so the static address mapping and the
+whole-GPU instruction denominator both use the chosen thread count.
+
 ## Nsight Systems
 
 ```bash

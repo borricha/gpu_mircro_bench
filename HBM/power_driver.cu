@@ -34,6 +34,8 @@ struct PowerOptions {
   int activeLoads = 64;
   size_t mib = 1024;
   int blocksPerSm = kDefaultBlocksPerSm;
+  int gridBlocks = 0;
+  int threads = kDefaultThreads;
   std::string input = "random";
   double preconditionSeconds = 20.0;
   double measureSeconds = 60.0;
@@ -80,6 +82,8 @@ PowerOptions parsePowerOptions(int argc, char** argv) {
     else if (arg == "--active-loads") options.activeLoads = static_cast<int>(parseIntegerPower(value(), "active-loads"));
     else if (arg == "--mib") options.mib = static_cast<size_t>(parseIntegerPower(value(), "mib"));
     else if (arg == "--blocks-per-sm") options.blocksPerSm = static_cast<int>(parseIntegerPower(value(), "blocks-per-sm"));
+    else if (arg == "--grid-blocks") options.gridBlocks = static_cast<int>(parseIntegerPower(value(), "grid-blocks"));
+    else if (arg == "--threads") options.threads = static_cast<int>(parseIntegerPower(value(), "threads"));
     else if (arg == "--input") options.input = value();
     else if (arg == "--precondition-seconds") options.preconditionSeconds = parseDoublePower(value(), "precondition-seconds");
     else if (arg == "--measure-seconds") options.measureSeconds = parseDoublePower(value(), "measure-seconds");
@@ -95,7 +99,8 @@ PowerOptions parsePowerOptions(int argc, char** argv) {
     else if (arg == "--help" || arg == "-h") {
       std::cout << "Usage: " << argv[0]
                 << " --kind load-xor|xor-only --active-loads 64|128"
-                << " [--device N --mib 1024 --blocks-per-sm 8]"
+                << " [--device N --mib 1024 --blocks-per-sm 8 | --grid-blocks N]"
+                << " [--threads 128|256]"
                 << " [--precondition-seconds 20 --measure-seconds 60]"
                 << " [--inner-repeats 64 --graph-nodes 0 --sample-ms 10]"
                 << " [--p-constant-w W --p-static-w W]"
@@ -106,7 +111,8 @@ PowerOptions parsePowerOptions(int argc, char** argv) {
   if (options.device < 0 ||
       (options.kind != "load-xor" && options.kind != "xor-only") ||
       (options.activeLoads != 64 && options.activeLoads != 128) || options.mib == 0 ||
-      options.blocksPerSm < 1 || options.preconditionSeconds < 0 ||
+      options.blocksPerSm < 1 || options.gridBlocks < 0 ||
+      (options.threads != 128 && options.threads != 256) || options.preconditionSeconds < 0 ||
       options.measureSeconds <= 0 || options.sampleMs == 0 || options.innerRepeats < 1 ||
       options.launchBatch < 1 || options.graphNodes < 0 || options.repetition < 1 ||
       options.pConstantW < 0 || options.pStaticW < 0)
@@ -151,10 +157,10 @@ void runPowerTrial(const PowerOptions& options) {
   if (bytes <= static_cast<size_t>(prop.l2CacheSize))
     failPower("--mib must exceed L2 size for an HBM power trial");
   const size_t count = bytes / sizeof(packed_fp32);
-  const int blocks = prop.multiProcessorCount * options.blocksPerSm;
-  if (options.kind == "load-xor" && blocks != kDominantFixedGridBlocks)
-    failPower("load-xor requires 108 SM x 8 blocks/SM (864 blocks) on this A100");
-  const size_t groupBytes = static_cast<size_t>(blocks) * kWordsPerRegion * sizeof(std::uint32_t);
+  const int blocks = options.gridBlocks > 0
+      ? options.gridBlocks
+      : prop.multiProcessorCount * options.blocksPerSm;
+  const size_t groupBytes = static_cast<size_t>(blocks) * wordsPerRegion(options.threads) * sizeof(std::uint32_t);
   const size_t groups = bytes / groupBytes;
   if (groups == 0) failPower("buffer too small for HBM stream geometry");
   const int rounds = options.activeLoads / kScalarLoadsPerRound;
@@ -164,8 +170,8 @@ void runPowerTrial(const PowerOptions& options) {
   // Allocating/initializing a matching footprint keeps the CUDA context and
   // memory footprint stable between xor-only and both load kernels. Xor-only never
   // reads it during the measurement graph.
-  const int initBlocks = std::min<int>(65535, (count + kThreads - 1) / kThreads);
-  initBits<<<initBlocks, kThreads>>>(data, count, inputMode(options.input));
+  const int initBlocks = std::min<int>(65535, (count + kDefaultThreads - 1) / kDefaultThreads);
+  initBits<<<initBlocks, kDefaultThreads>>>(data, count, inputMode(options.input));
   CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -178,9 +184,9 @@ void runPowerTrial(const PowerOptions& options) {
   int powerInnerRepeats = options.innerRepeats;
   auto launch = [&](cudaStream_t target) {
     if (options.kind == "load-xor")
-      launchLoadDominant(data, groups, blocks, rounds, powerInnerRepeats, target);
+      launchLoadDominant(data, groups, blocks, options.threads, rounds, powerInnerRepeats, target);
     else
-      launchXorOnly(groups, blocks, rounds, powerInnerRepeats, target);
+      launchXorOnly(groups, blocks, rounds, options.threads, powerInnerRepeats, target);
   };
 
   // Event-time one node. This calibration is outside the telemetry interval.
@@ -307,7 +313,7 @@ void runPowerTrial(const PowerOptions& options) {
   }
 
   const double workGroups = static_cast<double>(graphNodes) * powerInnerRepeats *
-      groups * blocks * (kThreads / 32);  // warp × group instances
+      groups * blocks * (options.threads / 32);  // warp × group instances
   // `activeLoads` is already expressed in the executed warp-level SASS LDG
   // count. NCU's Executed Instruction Mix reports 64/128 LDG for r1/r2,
   // respectively, per warp/group. Keep this telemetry accounting in that
@@ -337,7 +343,8 @@ void runPowerTrial(const PowerOptions& options) {
       "p_constant_w,p_static_w,board_energy_j,energy_after_const_j,"
       "energy_after_const_static_j,util_avg_pct,sm_clock_avg_mhz,sm_clock_min_mhz,"
       "sm_clock_max_mhz,mem_clock_avg_mhz,temp_max_c,sample_count,throttle_any_pct,"
-      "throttle_sw_power_pct,throttle_hw_slowdown_pct,throttle_hw_thermal_pct,telemetry_csv";
+      "throttle_sw_power_pct,throttle_hw_slowdown_pct,throttle_hw_thermal_pct,telemetry_csv,"
+      "grid_blocks,threads_per_block,groups";
   std::ostringstream row;
   row << options.kind << ',' << options.activeLoads << ",executed_warp_sass," << options.repetition << ','
       << graphNodes << ',' << powerInnerRepeats << ',' << preconditionNodes << ','
@@ -351,7 +358,7 @@ void runPowerTrial(const PowerOptions& options) {
       << telemetry.temp_max_c << ',' << telemetry.sample_count << ','
       << telemetry.throttle_any_pct << ',' << telemetry.throttle_sw_power_pct << ','
       << telemetry.throttle_hw_slowdown_pct << ',' << telemetry.throttle_hw_thermal_pct << ','
-      << options.telemetryOutput;
+      << options.telemetryOutput << ',' << blocks << ',' << options.threads << ',' << groups;
   if (!options.output.empty()) {
     ensureParentDirectory(options.output);
     const bool writeHeader = !hasContent(options.output);
@@ -364,6 +371,7 @@ void runPowerTrial(const PowerOptions& options) {
   std::cout << std::fixed << std::setprecision(3)
             << "SASS power trial: kind=" << options.kind
             << " active_loads=" << options.activeLoads
+            << " grid_blocks=" << blocks << " threads=" << options.threads
             << " graph_nodes=" << graphNodes << " inner_repeats=" << powerInnerRepeats
             << " active_s=" << activeSeconds << " board=" << telemetry.time_weighted_avg_w
             << "W ldg_rate=" << ldgRate / 1.0e9 << " Gwarp-inst/s"
